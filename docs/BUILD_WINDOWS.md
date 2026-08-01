@@ -1,77 +1,132 @@
-# Building the foobar2000 component on Windows
+# Building the foobar2000 component with Build Tools 2022
+
+The repository contains a command-line MSBuild project for a real foobar2000 v2
+x64 component. A Visual Studio IDE installation is not needed.
 
 ## Requirements
 
-- Windows 10 or 11, x64
-- Visual Studio 2022 with **Desktop development with C++**
+- Windows 10 or 11 x64
 - foobar2000 v2 x64
-- foobar2000 SDK `2025-03-07`
+- Official foobar2000 SDK `2025-03-07`
+- Visual Studio Build Tools 2022 with:
+  - **Desktop development with C++** workload
+  - MSVC v143 C++ x64/x86 build tools
+  - A Windows 10 or Windows 11 SDK
+  - C++ CMake tools for Windows
 
-## Core library
+WTL, ATL, and the SDK helpers project are not used by this registration-only
+component.
 
-The audio-independent core can be built immediately:
+## SDK layout
 
-```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
-
-This build produces the core library and the test executable. Depending on the
-generator, the relevant outputs will look like:
+Download the official SDK `2025-03-07` and extract its contents. For the default
+build, the SDK root must be `external\foobar2000-sdk`:
 
 ```text
-loop_finder_core.lib
-loop_finder_tests.exe
+external\foobar2000-sdk\
+├── foobar2000\
+│   ├── SDK\
+│   │   └── foobar2000_SDK.vcxproj
+│   ├── shared\
+│   │   └── shared-x64.lib
+│   └── foobar2000_component_client\
+│       └── foobar2000_component_client.vcxproj
+└── pfc\
+    └── pfc.vcxproj
 ```
 
-Neither file can be loaded by foobar2000. A foobar2000 component must be a DLL
-built against the foobar2000 SDK.
+The SDK archive itself may have a versioned outer folder. Use the directory
+that directly contains `foobar2000` and `pfc` as `FoobarSdkPath`.
 
-## Native adapter
+## Build and test
 
-The official SDK is distributed as a Visual Studio solution. Extract it next
-to this repository, add `src/foobar/component.cpp` and the three `src/core/*.cpp`
-files to a copy of the SDK `foo_sample` component, then:
+Open a regular PowerShell terminal in the repository root. The script locates
+Build Tools with `vswhere.exe` and initializes the x64 compiler environment, so
+it does not need a Developer PowerShell shortcut.
 
-1. Rename the output project and DLL to `foo_loop_finder`.
-2. Add this repository's `include` directory to **Additional Include Directories**.
-3. Select `Release | x64`.
-4. Build the project and confirm that it produces `foo_loop_finder.dll`.
-
-The component architecture must match the player architecture. The instructions
-above target foobar2000 v2 x64 and therefore require a `Release | x64` DLL.
-
-## Package the component
-
-From PowerShell, create an installation package containing the DLL at the root
-of the archive:
+With the SDK in the default location:
 
 ```powershell
-New-Item package -ItemType Directory -Force
-Copy-Item path\to\foo_loop_finder.dll package\
-Compress-Archive package\* foo_loop_finder.zip -Force
-Rename-Item foo_loop_finder.zip foo_loop_finder.fb2k-component
+.\build.ps1 -Clean
 ```
 
-## Install in foobar2000
+With an SDK extracted elsewhere:
 
-1. Open **File > Preferences > Components**.
-2. Click **Install...**.
-3. Select `foo_loop_finder.fb2k-component`.
-4. Click **Apply** and restart foobar2000 when prompted.
-5. Return to **Preferences > Components** and verify that **Loop Finder 0.1.0**
-   appears in the installed component list.
+```powershell
+.\build.ps1 -Clean -FoobarSdkPath "D:\path\to\SDK-2025-03-07"
+```
 
-You can also open the `.fb2k-component` file directly and let foobar2000 handle
-the installation.
+`Release|x64` is the default. A debug component can be built with:
 
-## Current limitation
+```powershell
+.\build.ps1 -Clean -Configuration Debug
+```
 
-The adapter currently registers the component only. The next milestone adds the
-Default UI element and connects playback callbacks to `LoopEngine`. Therefore,
-successfully installing version 0.1.0 only makes it appear in the installed
-component list: it does not add a visible panel or loop controls yet.
+The script performs these operations in order:
 
-If the build directory contains only `loop_finder_core.lib` and
-`loop_finder_tests.exe`, the native SDK component has not been built yet.
+1. Validates the SDK projects and `shared-x64.lib`.
+2. Removes generated output when `-Clean` is present, before CMake configures.
+3. Configures the core in `build\vs2022-x64`, keeping this generator isolated.
+4. Builds the core and test executable and runs CTest unless `-SkipTests` is set.
+5. Builds `native\foo_loop_finder.vcxproj` with MSBuild and `FoobarSdkRoot`.
+6. Verifies that the DLL exists, packages it, and verifies the archive entry.
+
+Expected Release outputs are:
+
+```text
+build\vs2022-x64\Release\loop_finder_core.lib
+build\vs2022-x64\Release\loop_finder_tests.exe
+build\native\Release\foo_loop_finder.dll
+build\foo_loop_finder.fb2k-component
+```
+
+The `.fb2k-component` file is a ZIP-compatible archive containing only
+`foo_loop_finder.dll` at its root.
+
+## Direct MSBuild invocation
+
+Normally `build.ps1` should be used because it also tests the core and packages
+the DLL. From an x64 Build Tools developer shell, the native project can be
+built directly when diagnosing it:
+
+```powershell
+msbuild native\foo_loop_finder.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:FoobarSdkRoot="D:\path\to\SDK-2025-03-07"
+```
+
+The project targets toolset `v143`, uses C++20 and the SDK-compatible dynamic
+MSVC runtime (`/MD` or `/MDd`), and
+references:
+
+- `pfc\pfc.vcxproj`
+- `foobar2000\SDK\foobar2000_SDK.vcxproj`
+- `foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj`
+- `foobar2000\shared\shared-x64.lib`
+
+It compiles `src\foobar\component.cpp` and the existing platform-independent
+core sources. It does not copy or modify SDK sources.
+
+The official SDK's Win32/x64 project configurations name toolset `v142` for
+Visual Studio 2019 compatibility. Passing `PlatformToolset=v143` as a global
+property retargets those referenced projects in memory for Build Tools 2022;
+the extracted SDK project files are not edited.
+
+## Install
+
+In foobar2000, use **File → Preferences → Components → Install**, select
+`build\foo_loop_finder.fb2k-component`, apply the change, and restart when
+prompted. Return to **Preferences → Components** and confirm that **Loop Finder
+0.1.0** is listed.
+
+This milestone only registers the component. It does not add a visible panel,
+menus, or loop controls yet, and looping remains disabled by default.
+
+## Common errors
+
+- If the default SDK is absent, the script reports the exact extraction target:
+  `external\foobar2000-sdk`.
+- If `-FoobarSdkPath` points at the archive or its parent rather than the
+  extracted SDK root, the script lists every missing required file.
+- If Build Tools discovery fails, add the workload and individual components
+  listed under **Requirements** using Visual Studio Installer.
+- A 32-bit DLL cannot load in foobar2000 v2 x64. This project intentionally has
+  only `Debug|x64` and `Release|x64` configurations.

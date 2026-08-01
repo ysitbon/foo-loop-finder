@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D6382D78-2294-4D9F-8941-35D7F88A302E}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>foo_loop_finder</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>foo_loop_finder</TargetName>
+    <OutDir>$(ProjectDir)..\build\native\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\native\obj\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\include;$(FoobarSdkRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <TargetMachine>MachineX64</TargetMachine>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\include;$(FoobarSdkRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <TargetMachine>MachineX64</TargetMachine>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="$(ProjectDir)..\src\foobar\component.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\core\beat_grid.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\core\loop_engine.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\core\waveform.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(FoobarSdkRoot)\pfc\pfc.vcxproj">
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="$(FoobarSdkRoot)\foobar2000\SDK\foobar2000_SDK.vcxproj">
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="$(FoobarSdkRoot)\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj">
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Target Name="ValidateFoobarSdkRoot" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(FoobarSdkRoot)'==''" Text="FoobarSdkRoot is required. Pass /p:FoobarSdkRoot=&quot;path\to\SDK-2025-03-07&quot;." />
+    <Error Condition="!Exists('$(FoobarSdkRoot)\pfc\pfc.vcxproj')" Text="FoobarSdkRoot does not contain pfc\pfc.vcxproj: $(FoobarSdkRoot)" />
+    <Error Condition="!Exists('$(FoobarSdkRoot)\foobar2000\SDK\foobar2000_SDK.vcxproj')" Text="FoobarSdkRoot does not contain foobar2000\SDK\foobar2000_SDK.vcxproj: $(FoobarSdkRoot)" />
+    <Error Condition="!Exists('$(FoobarSdkRoot)\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj')" Text="FoobarSdkRoot does not contain foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj: $(FoobarSdkRoot)" />
+    <Error Condition="!Exists('$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib')" Text="FoobarSdkRoot does not contain foobar2000\shared\shared-x64.lib: $(FoobarSdkRoot)" />
+  </Target>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

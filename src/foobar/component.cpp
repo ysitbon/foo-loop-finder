@@ -1,5 +1,5 @@
-// Native foobar2000 adapter skeleton. Add this file to the SDK foo_sample
-// Visual Studio solution after configuring the core library include path.
+// Registration-only native adapter. UI and playback services are intentionally
+// deferred to later milestones; loading this DLL only registers its metadata.
 #ifdef _WIN32
 #include <foobar2000/SDK/foobar2000.h>
 
@@ -11,4 +11,3 @@ DECLARE_COMPONENT_VERSION(
 
 VALIDATE_COMPONENT_FILENAME("foo_loop_finder.dll");
 #endif
-

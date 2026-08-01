@@ -25,7 +25,6 @@ if(LOOP_FINDER_BUILD_TESTS)
     add_test(NAME loop_finder_tests COMMAND loop_finder_tests)
 endif()
 
-# The SDK ships as Visual Studio projects rather than a stable CMake package.
-# The native adapter is kept in src/foobar and added to the SDK's foo_sample
-# solution as documented in docs/BUILD_WINDOWS.md.
-
+# The official SDK ships as Visual Studio projects rather than a CMake package.
+# native/foo_loop_finder.vcxproj builds the Windows component and reuses these
+# core sources directly; this CMake project remains SDK-independent.
