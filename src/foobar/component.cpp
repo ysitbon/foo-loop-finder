@@ -1,5 +1,5 @@
-// Registration-only native adapter. UI and playback services are intentionally
-// deferred to later milestones; loading this DLL only registers its metadata.
+// Component identity is kept separate from the Default UI implementation and
+// playback display callbacks in ui_element.cpp.
 #ifdef _WIN32
 #include <foobar2000/SDK/foobar2000.h>
 

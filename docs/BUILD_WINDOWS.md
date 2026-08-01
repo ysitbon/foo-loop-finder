@@ -14,8 +14,9 @@ x64 component. A Visual Studio IDE installation is not needed.
   - A Windows 10 or Windows 11 SDK
   - C++ CMake tools for Windows
 
-WTL, ATL, and the SDK helpers project are not used by this registration-only
-component.
+WTL, ATL, and the SDK helpers project are not required. The Default UI panel
+uses the official `ui_element` interfaces with a project-owned raw Win32 child
+window, so the Build Tools requirements remain unchanged.
 
 ## SDK layout
 
@@ -102,8 +103,9 @@ references:
 - `foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj`
 - `foobar2000\shared\shared-x64.lib`
 
-It compiles `src\foobar\component.cpp` and the existing platform-independent
-core sources. It does not copy or modify SDK sources.
+It compiles `src\foobar\component.cpp`, `src\foobar\ui_element.cpp` and the
+existing platform-independent core sources. It does not copy or modify SDK
+sources.
 
 The official SDK's Win32/x64 project configurations name toolset `v142` for
 Visual Studio 2019 compatibility. Passing `PlatformToolset=v143` as a global
@@ -117,8 +119,11 @@ In foobar2000, use **File → Preferences → Components → Install**, select
 prompted. Return to **Preferences → Components** and confirm that **Loop Finder
 0.1.0** is listed.
 
-This milestone only registers the component. It does not add a visible panel,
-menus, or loop controls yet, and looping remains disabled by default.
+After restart, enable Default UI layout editing, add **Loop Finder** from the
+**Playback Information** group, then disable layout editing. The panel displays
+the current track title, Playing/Paused/Stopped state, and **Loop: Off**.
+Looping remains disabled by default and the panel does not yet provide loop
+controls.
 
 ## Common errors
 

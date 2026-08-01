@@ -20,12 +20,12 @@ passing on Linux and Windows/MSVC.
 ## M1 — Loadable foobar2000 component
 
 - [x] Declare the `Loop Finder 0.1.0` component identity.
-- [ ] Provide a Build Tools-only native x64 project linked to SDK 2025-03-07.
-- [ ] Produce `build\native\Release\foo_loop_finder.dll`.
-- [ ] Package the DLL at the archive root of
+- [x] Provide a Build Tools-only native x64 project linked to SDK 2025-03-07.
+- [x] Produce `build\native\Release\foo_loop_finder.dll`.
+- [x] Package the DLL at the archive root of
       `build\foo_loop_finder.fb2k-component`.
-- [ ] Install the package in foobar2000 v2 x64.
-- [ ] Verify `Loop Finder 0.1.0` appears under Preferences > Components.
+- [x] Install the package in foobar2000 v2 x64.
+- [x] Verify `Loop Finder 0.1.0` appears under Preferences > Components.
 
 Acceptance evidence: retain the successful Windows build output, inspect the
 package contents and manually verify the installed component entry. Do not mark
@@ -33,11 +33,11 @@ this milestone complete based only on a `.vcxproj` or registration source.
 
 ## M2 — Default UI panel shell
 
-- [ ] Register a Default UI element.
-- [ ] Render a placeholder panel in foobar2000.
+- [x] Register a Default UI element.
+- [x] Render a placeholder panel in foobar2000.
 - [ ] Follow foobar2000 light/dark colors and DPI scaling.
-- [ ] Show track title and basic playback state.
-- [ ] Keep UI updates on the correct thread.
+- [x] Show track title and basic playback state.
+- [x] Keep UI updates on the correct thread.
 
 Acceptance evidence: add the panel to a Default UI layout, restart foobar2000
 and verify it renders without crashes or startup regressions.
@@ -118,7 +118,5 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Complete M1 by implementing and actually running the Build Tools-only native
-build against the official SDK, then install the generated package in
-foobar2000. After M1 is verified, begin M2 rather than jumping directly to
-waveform or playback behavior.
+Validate the M2 panel shell with light/dark colors and DPI scaling before
+marking M2 complete.

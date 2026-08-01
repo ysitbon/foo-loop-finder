@@ -57,9 +57,11 @@ Location:
 src/foobar/
 ```
 
-Current responsibility:
+Current responsibilities:
 
 - Declare component identity and version.
+- Register the Default UI panel and adapt main-thread playback callbacks into
+  display-only panel state.
 
 Planned responsibilities:
 
@@ -94,7 +96,13 @@ The official SDK is an external build dependency and must not be committed.
 
 ### Default UI panel
 
-Planned initial controls:
+The initial panel shell is a native child window under `src/foobar`. It follows
+the SDK's `ui_element`/`ui_element_instance` pattern, consumes the host's color
+and font callbacks, and scales its layout from the window DPI. The shell shows
+the current title and playback state while keeping Loop visibly and
+functionally off. It does not mutate portable core or playback state.
+
+Planned editor controls:
 
 - waveform overview and zoomed viewport;
 - playback cursor;
@@ -164,4 +172,3 @@ Persist per-track data such as:
 
 Do not persist Loop as active. A new application/component session always
 starts with Loop disabled.
-

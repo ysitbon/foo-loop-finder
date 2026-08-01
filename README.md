@@ -13,10 +13,12 @@ drum patterns over them.
 - Opt-in loop transport, always disabled on startup
 - Platform-independent core with unit tests
 - Installable x64 foobar2000 component registration
+- Default UI panel shell with current title and playback state
 
-This milestone registers **Loop Finder 0.1.0** so it appears in
-**Preferences > Components**. It does not provide a visible panel or loop
-controls yet. The loop remains disabled by default.
+The native component registers **Loop Finder 0.1.0** and provides a **Loop
+Finder** Default UI element. The panel displays the current title,
+Playing/Paused/Stopped state, and **Loop: Off**. It does not yet provide loop
+controls, waveform rendering or seeking; looping remains disabled by default.
 
 ## Windows build
 
@@ -60,6 +62,9 @@ Install the package using **foobar2000 → File → Preferences → Components �
 Install**, apply the change, and restart when prompted. The package is a
 ZIP-compatible archive with `foo_loop_finder.dll` at its root.
 
+To show the panel, enable Default UI layout editing, add **Loop Finder** from
+the **Playback Information** group, and disable layout editing again.
+
 See [docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md) for requirements,
 troubleshooting, direct MSBuild usage, and all artifact paths.
 
@@ -76,9 +81,9 @@ ctest --test-dir build\core --output-on-failure
 
 ## Roadmap
 
-1. Default UI panel with waveform, BPM, offset, IN/OUT and Loop controls
+1. Validate the Default UI panel shell in foobar2000
 2. Decode the current track in the background and cache its waveform
-3. Connect playback callbacks and seek from OUT to IN
-4. Add tap tempo and per-track persistence
+3. Add BPM, offset, IN/OUT and opt-in Loop controls
+4. Connect playback callbacks and seek from OUT to IN
 5. Add automatic BPM/beat detection
 6. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP

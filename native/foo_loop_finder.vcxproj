@@ -94,6 +94,7 @@
 
   <ItemGroup>
     <ClCompile Include="$(ProjectDir)..\src\foobar\component.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\foobar\ui_element.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\beat_grid.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\loop_engine.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\waveform.cpp" />
