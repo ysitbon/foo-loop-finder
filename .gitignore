@@ -1,0 +1,9 @@
+/build/
+/.vs/
+/out/
+*.user
+*.suo
+*.fb2k-component
+*.dll
+*.zip
+
