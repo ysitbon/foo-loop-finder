@@ -35,24 +35,30 @@ this milestone complete based only on a `.vcxproj` or registration source.
 
 - [x] Register a Default UI element.
 - [x] Render a placeholder panel in foobar2000.
-- [ ] Follow foobar2000 light/dark colors and DPI scaling.
+- [x] Follow foobar2000 light/dark colors and DPI scaling.
 - [x] Show track title and basic playback state.
 - [x] Keep UI updates on the correct thread.
 
-Acceptance evidence: add the panel to a Default UI layout, restart foobar2000
-and verify it renders without crashes or startup regressions.
+Acceptance evidence: the component installs, the Loop Finder Default UI element
+can be added and renders correctly, stopped/playing/paused states and track
+changes work, light/dark colors and DPI behavior pass, and no crash or startup
+regression was observed.
 
 ## M3 — Waveform view
 
-- [ ] Decode the current local track in a background task.
-- [ ] Feed decoded PCM into the portable waveform reducer.
-- [ ] Render the entire-track waveform.
-- [ ] Render and update the playback cursor.
-- [ ] Add click-to-seek, zoom and horizontal navigation.
-- [ ] Cancel stale analysis when the current track changes.
-- [ ] Cache waveform data by stable track identity and analysis version.
+- [x] Decode the current local track in a background task.
+- [x] Feed decoded PCM into the portable waveform reducer.
+- [x] Render the entire-track waveform.
+- [x] Render and update the playback cursor.
+- [x] Add click-to-seek, zoom and horizontal navigation.
+- [x] Cancel stale analysis when the current track changes.
+- [x] Cache waveform data by stable track identity and analysis version.
+- [ ] Complete runtime acceptance in foobar2000.
 
-Acceptance evidence: switch rapidly between tracks, seek and restart foobar2000
+Implementation evidence: portable waveform tests pass and the M3 component
+builds as Release x64 against SDK 2025-03-07; the package contains the DLL at
+its archive root. Runtime acceptance remains pending: switch rapidly between
+tracks, seek, zoom, resize, change DPI/theme, stop and restart foobar2000
 without blocking playback, showing stale data or crashing.
 
 ## M4 — Manual rhythmic loop editor
@@ -118,5 +124,5 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Validate the M2 panel shell with light/dark colors and DPI scaling before
-marking M2 complete.
+Complete the documented M3 manual foobar2000 verification. Do not begin M4
+until M3 runtime acceptance is confirmed.

@@ -13,16 +13,15 @@ test.
 flowchart TD
     FB["foobar2000 playback"] --> Adapter["foobar adapter"]
     Adapter --> Core["loop and beat-grid core"]
-    Decoder["background track decoder"] --> Waveform["waveform cache"]
+    Decoder["owned background decoder"] --> Waveform["bounded waveform cache"]
     Core --> Panel["Default UI panel"]
     Waveform --> Panel
     Panel --> Adapter
     Adapter --> FB
 ```
 
-The decoder, cache and panel are planned boundaries. The portable core and
-minimal component registration already exist; consult `ROADMAP.md` for verified
-status.
+The decoder, cache and panel boundaries are implemented for M3; consult
+`ROADMAP.md` for build and manual-acceptance status.
 
 ## Modules
 
@@ -41,6 +40,9 @@ Responsibilities:
 - `LoopEngine`: validated state transitions and loop-boundary decisions.
 - `beat_grid`: beat duration, marker snapping and visible grid-line generation.
 - `waveform`: reduction of interleaved PCM into display-ready min/max/RMS bins.
+- `StreamingWaveformReducer`: bounded incremental PCM reduction.
+- `resample_waveform`: normalized viewport selection and drawing-width
+  resampling without changing cached data.
 
 Constraints:
 
@@ -61,12 +63,14 @@ Current responsibilities:
 
 - Declare component identity and version.
 - Register the Default UI panel and adapt main-thread playback callbacks into
-  display-only panel state.
+  panel state.
+- Decode local tracks with SDK input decoders on one owned worker thread.
+- Cancel obsolete work and publish immutable waveform snapshots on the main
+  thread.
+- Keep an eight-entry in-memory LRU cache.
 
-Planned responsibilities:
+Later responsibilities:
 
-- Observe playback lifecycle and current position.
-- Decode the current track for analysis without blocking playback.
 - Translate UI actions into core state transitions.
 - Seek from OUT to IN when looping is enabled.
 - Prevent feedback loops and avoid intercepting user seeks.
@@ -96,16 +100,20 @@ The official SDK is an external build dependency and must not be committed.
 
 ### Default UI panel
 
-The initial panel shell is a native child window under `src/foobar`. It follows
+The panel is a native child window under `src/foobar`. It follows
 the SDK's `ui_element`/`ui_element_instance` pattern, consumes the host's color
-and font callbacks, and scales its layout from the window DPI. The shell shows
-the current title and playback state while keeping Loop visibly and
-functionally off. It does not mutate portable core or playback state.
+and font callbacks, and scales its layout from the window DPI. It shows the
+current title, playback state, waveform status, waveform and playback cursor
+while keeping Loop visibly and functionally off. Click-to-seek calls the SDK
+only from the main thread and only when playback reports seeking is supported.
 
-Planned editor controls:
+The waveform opens in a whole-track overview. Mouse-wheel zoom is centered on
+the pointer, dragging pans a zoomed viewport, and double-click restores the
+overview. Cached bins do not depend on the HWND size or DPI; the portable core
+resamples the selected range for each paint.
 
-- waveform overview and zoomed viewport;
-- playback cursor;
+Later editor controls:
+
 - beat and bar grid;
 - BPM value and tap tempo;
 - grid phase/offset;
@@ -139,11 +147,33 @@ callbacks and seeking.
 
 Track analysis is performed outside the real-time playback path:
 
-1. Resolve the current playable track.
-2. Decode PCM in a background task.
-3. Reduce PCM to resolution-independent peak/RMS bins.
-4. Cache by a stable track identity plus analysis version.
-5. Publish immutable data to the panel on the correct UI thread.
+1. A main-thread playback callback captures the `metadb_handle`, creates a
+   stable identity from path, subsong, file size, timestamp and the explicit
+   waveform format version, then checks the LRU cache.
+2. A single joinable worker uses the official SDK 2025-03-07
+   `input_entry::g_open_for_decoding`, `input_decoder::get_info`,
+   `initialize(input_flag_simpledecode)` and `run(audio_chunk)` sequence.
+3. Each decoded interleaved PCM chunk is converted to portable floats and fed
+   to `StreamingWaveformReducer`. Adaptive bin compaction bounds temporary and
+   cached analysis memory.
+4. Completion captures an immutable `shared_ptr<const WaveformSnapshot>` and
+   queues delivery with `fb2k::inMainThread`.
+5. Both an SDK `abort_callback_impl` and a monotonically increasing generation
+   reject obsolete work. The panel also compares the stable identity, so an old
+   completion cannot overwrite a newer track even if cancellation races.
+
+The worker is owned by the panel analysis controller; it is never detached.
+Destruction disables queued delivery, signals cancellation, and joins the
+worker before releasing state. No `playback_control` or panel/window operation
+is performed by the worker. A 50 ms main-thread timer is active only while a
+waveform is available and playback is running; it invalidates the waveform
+region for a smooth cursor and is stopped on pause, stop and destruction.
+
+The LRU holds at most eight resolution-independent snapshots (16,384 bins per
+track). It is deliberately in-memory only. Remote/unrecognized inputs and
+tracks with zero or unknown duration are reported as unavailable; unsupported
+decoder and I/O failures are contained as panel status rather than propagated
+to the host.
 
 Automatic BPM and beat detection are separate analysis outputs. Manual BPM,
 tap tempo and grid phase remain available because automatic estimates can be

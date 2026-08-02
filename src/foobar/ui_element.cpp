@@ -1,10 +1,17 @@
 #ifdef _WIN32
 #include <foobar2000/SDK/foobar2000.h>
 
+#include "waveform_analysis.hpp"
+
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
+#include <windowsx.h>
 
 namespace {
 
@@ -16,6 +23,8 @@ constexpr GUID kLoopFinderElementGuid = {
 
 constexpr wchar_t kLoopFinderWindowClass[] =
     L"{7EFA898C-73E2-4C7F-AC87-21C7A5E87422}";
+constexpr UINT_PTR kCursorTimer = 1;
+constexpr UINT kCursorTimerMilliseconds = 50;
 
 UINT window_dpi(HWND window) noexcept {
     using GetDpiForWindowFunction = UINT(WINAPI*)(HWND);
@@ -62,12 +71,30 @@ public:
         : play_callback_impl_base(
               flag_on_playback_starting | flag_on_playback_new_track |
               flag_on_playback_stop | flag_on_playback_pause |
+              flag_on_playback_seek | flag_on_playback_time |
               flag_on_playback_edited | flag_on_playback_dynamic_info_track),
           configuration_(std::move(configuration)),
           callback_(std::move(callback)),
-          playback_(playback_control::get()) {
+          playback_(playback_control::get()),
+          analysis_([this](std::uint64_t generation,
+                           const std::string& identity,
+                           loop_finder::foobar::WaveformSnapshotPtr snapshot,
+                           const std::string& error) {
+              on_analysis_complete(generation,
+                                   identity,
+                                   std::move(snapshot),
+                                   error);
+          }) {
         titleformat_compiler::get()->compile_safe(
             title_script_, "$if2(%title%,%filename%)");
+    }
+
+    ~LoopFinderPanel() {
+        core_api::ensure_main_thread();
+        analysis_.cancel();
+        if (window_ != nullptr) {
+            KillTimer(window_, kCursorTimer);
+        }
     }
 
     void initialize_window(HWND parent) {
@@ -92,6 +119,10 @@ public:
         }
 
         refresh_playback_snapshot();
+        metadb_handle_ptr current;
+        if (playback_->get_now_playing(current)) {
+            begin_analysis(std::move(current));
+        }
     }
 
     HWND get_wnd() override {
@@ -121,8 +152,8 @@ public:
     ui_element_min_max_info get_min_max_info() override {
         ui_element_min_max_info result;
         const UINT dpi = window_dpi(window_);
-        result.m_min_width = static_cast<t_uint32>(scale_for_dpi(180, dpi));
-        result.m_min_height = static_cast<t_uint32>(scale_for_dpi(104, dpi));
+        result.m_min_width = static_cast<t_uint32>(scale_for_dpi(240, dpi));
+        result.m_min_height = static_cast<t_uint32>(scale_for_dpi(180, dpi));
         result.adjustForWindow(window_);
         return result;
     }
@@ -145,11 +176,18 @@ private:
         stopped,
     };
 
+    enum class WaveformState {
+        no_track,
+        analyzing,
+        available,
+        unavailable,
+    };
+
     static void ensure_window_class() {
         static const ATOM window_class = [] {
             WNDCLASSEXW definition{};
             definition.cbSize = sizeof(definition);
-            definition.style = CS_HREDRAW | CS_VREDRAW;
+            definition.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
             definition.lpfnWndProc = &LoopFinderPanel::window_proc;
             definition.hInstance = core_api::get_my_instance();
             definition.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -192,6 +230,40 @@ private:
             panel->paint();
             return 0;
 
+        case WM_TIMER:
+            if (wparam == kCursorTimer) {
+                panel->update_playback_cursor();
+                return 0;
+            }
+            break;
+
+        case WM_MOUSEWHEEL:
+            panel->on_mouse_wheel(wparam, lparam);
+            return 0;
+
+        case WM_LBUTTONDOWN:
+            panel->on_left_button_down(GET_X_LPARAM(lparam),
+                                       GET_Y_LPARAM(lparam));
+            return 0;
+
+        case WM_MOUSEMOVE:
+            panel->on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            return 0;
+
+        case WM_LBUTTONUP:
+            panel->on_left_button_up(GET_X_LPARAM(lparam),
+                                     GET_Y_LPARAM(lparam));
+            return 0;
+
+        case WM_LBUTTONDBLCLK:
+            panel->reset_view();
+            return 0;
+
+        case WM_CAPTURECHANGED:
+            panel->mouse_down_ = false;
+            panel->dragging_ = false;
+            return 0;
+
         case WM_DPICHANGED:
         case 0x02E3: // WM_DPICHANGED_AFTERPARENT
             panel->callback_->on_min_max_info_change();
@@ -199,6 +271,7 @@ private:
             return 0;
 
         case WM_NCDESTROY: {
+            KillTimer(window, kCursorTimer);
             const LRESULT result =
                 DefWindowProcW(window, message, wparam, lparam);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
@@ -209,6 +282,7 @@ private:
         default:
             return DefWindowProcW(window, message, wparam, lparam);
         }
+        return DefWindowProcW(window, message, wparam, lparam);
     }
 
     void paint() noexcept {
@@ -288,6 +362,13 @@ private:
         SetTextColor(dc, blend_colors(foreground, background));
         DrawTextW(dc, L"Loop: Off", -1, &line, text_flags);
 
+        RECT waveform{line.left,
+                      line.bottom + line_gap,
+                      (std::max)(line.left, bounds.right - margin),
+                      (std::max)(line.bottom + line_gap,
+                                 bounds.bottom - margin)};
+        draw_waveform(dc, waveform, foreground, background, font, line_height);
+
         if (heading_font != nullptr) {
             DeleteObject(heading_font);
         }
@@ -295,6 +376,159 @@ private:
             SelectObject(dc, previous_font);
         }
         EndPaint(window_, &paint_state);
+    }
+
+    void draw_waveform(HDC dc,
+                       const RECT& bounds,
+                       COLORREF foreground,
+                       COLORREF background,
+                       HFONT font,
+                       int line_height) noexcept {
+        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+            return;
+        }
+
+        const COLORREF muted = blend_colors(foreground, background);
+        HPEN border_pen = CreatePen(PS_SOLID, 1, muted);
+        const HGDIOBJ previous_pen =
+            border_pen != nullptr ? SelectObject(dc, border_pen) : nullptr;
+        const HGDIOBJ previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Rectangle(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+        if (previous_brush != nullptr && previous_brush != HGDI_ERROR) {
+            SelectObject(dc, previous_brush);
+        }
+        if (previous_pen != nullptr && previous_pen != HGDI_ERROR) {
+            SelectObject(dc, previous_pen);
+        }
+        if (border_pen != nullptr) {
+            DeleteObject(border_pen);
+        }
+
+        RECT status_bounds{bounds.left + 5,
+                           bounds.top + 3,
+                           bounds.right - 5,
+                           (std::min)(bounds.bottom, bounds.top + line_height)};
+        SetTextColor(dc, muted);
+        SelectObject(dc, font);
+        const std::wstring status = waveform_status_text();
+        DrawTextW(dc,
+                  status.c_str(),
+                  -1,
+                  &status_bounds,
+                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX |
+                      DT_END_ELLIPSIS);
+
+        if (waveform_state_ != WaveformState::available || !waveform_) {
+            return;
+        }
+
+        const int interaction_height = line_height;
+        RECT graph{bounds.left + 2,
+                   status_bounds.bottom,
+                   bounds.right - 2,
+                   bounds.bottom - interaction_height};
+        if (graph.right <= graph.left || graph.bottom <= graph.top) {
+            return;
+        }
+
+        try {
+            const auto display = loop_finder::resample_waveform(
+                waveform_->bins,
+                view_begin_,
+                view_end_,
+                static_cast<std::size_t>(graph.right - graph.left));
+            const int center = graph.top + (graph.bottom - graph.top) / 2;
+            const double amplitude =
+                static_cast<double>((std::max)(
+                    1, static_cast<int>((graph.bottom - graph.top) / 2) - 1));
+
+            HPEN waveform_pen = CreatePen(PS_SOLID, 1, foreground);
+            const HGDIOBJ old_waveform_pen =
+                waveform_pen != nullptr ? SelectObject(dc, waveform_pen) : nullptr;
+            for (std::size_t index = 0; index < display.size(); ++index) {
+                const auto& bin = display[index];
+                const int x = graph.left + static_cast<int>(index);
+                const int top = center - static_cast<int>(
+                                             std::clamp(bin.maximum, -1.0F, 1.0F) *
+                                             amplitude);
+                const int bottom = center - static_cast<int>(
+                                                std::clamp(bin.minimum, -1.0F, 1.0F) *
+                                                amplitude);
+                MoveToEx(dc, x, top, nullptr);
+                LineTo(dc, x, (std::max)(top + 1, bottom));
+            }
+            if (old_waveform_pen != nullptr && old_waveform_pen != HGDI_ERROR) {
+                SelectObject(dc, old_waveform_pen);
+            }
+            if (waveform_pen != nullptr) {
+                DeleteObject(waveform_pen);
+            }
+
+            draw_cursor(dc, graph);
+        } catch (...) {
+            // Painting must never destabilize the host. Analysis data remains
+            // intact and the next invalidation can retry at a new panel size.
+        }
+
+        RECT help{bounds.left + 5,
+                  (std::max)(graph.bottom, bounds.bottom - line_height),
+                  bounds.right - 5,
+                  bounds.bottom - 2};
+        SetTextColor(dc, muted);
+        DrawTextW(dc,
+                  L"Wheel: zoom  Drag: pan  Click: seek  Double-click: overview",
+                  -1,
+                  &help,
+                  DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX |
+                      DT_END_ELLIPSIS);
+    }
+
+    void draw_cursor(HDC dc, const RECT& graph) noexcept {
+        if (!waveform_ || waveform_->duration_seconds <= 0.0) {
+            return;
+        }
+        const double position =
+            playback_position_ / waveform_->duration_seconds;
+        if (position < view_begin_ || position > view_end_) {
+            return;
+        }
+        const double relative =
+            (position - view_begin_) / (view_end_ - view_begin_);
+        const int x = graph.left + static_cast<int>(
+                                       relative * (graph.right - graph.left - 1));
+        const COLORREF highlight =
+            callback_->query_std_color(ui_color_highlight);
+        HPEN cursor_pen = CreatePen(PS_SOLID, 1, highlight);
+        const HGDIOBJ previous =
+            cursor_pen != nullptr ? SelectObject(dc, cursor_pen) : nullptr;
+        MoveToEx(dc, x, graph.top, nullptr);
+        LineTo(dc, x, graph.bottom);
+        if (previous != nullptr && previous != HGDI_ERROR) {
+            SelectObject(dc, previous);
+        }
+        if (cursor_pen != nullptr) {
+            DeleteObject(cursor_pen);
+        }
+    }
+
+    std::wstring waveform_status_text() const {
+        switch (waveform_state_) {
+        case WaveformState::no_track:
+            return L"Waveform: No track";
+        case WaveformState::analyzing:
+            return L"Waveform: Analyzing...";
+        case WaveformState::available:
+            return L"Waveform available";
+        case WaveformState::unavailable: {
+            const pfc::stringcvt::string_wide_from_utf8 wide_error(
+                analysis_error_.c_str());
+            return std::wstring(L"Waveform: Analysis unavailable") +
+                   (analysis_error_.empty()
+                        ? L""
+                        : std::wstring(L" - ") + wide_error.get_ptr());
+        }
+        }
+        return L"Waveform: Analysis unavailable";
     }
 
     const wchar_t* playback_state_text() const noexcept {
@@ -309,6 +543,261 @@ private:
         return L"Stopped";
     }
 
+    RECT waveform_bounds() const noexcept {
+        RECT bounds{};
+        if (window_ == nullptr || !GetClientRect(window_, &bounds)) {
+            return bounds;
+        }
+
+        const UINT dpi = window_dpi(window_);
+        const int margin = scale_for_dpi(12, dpi);
+        const int line_gap = scale_for_dpi(5, dpi);
+        int line_height = scale_for_dpi(18, dpi);
+        HDC dc = GetDC(window_);
+        if (dc != nullptr) {
+            HFONT font = callback_->query_font_ex(ui_font_default);
+            if (font == nullptr) {
+                font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+            }
+            const HGDIOBJ previous = SelectObject(dc, font);
+            TEXTMETRICW metrics{};
+            if (GetTextMetricsW(dc, &metrics)) {
+                line_height = (std::max)(
+                    line_height, static_cast<int>(metrics.tmHeight) + line_gap);
+            }
+            if (previous != nullptr && previous != HGDI_ERROR) {
+                SelectObject(dc, previous);
+            }
+            ReleaseDC(window_, dc);
+        }
+
+        return RECT{bounds.left + margin,
+                    bounds.top + margin + line_height * 4 + line_gap,
+                    (std::max)(bounds.left + margin, bounds.right - margin),
+                    (std::max)(bounds.top + margin + line_height * 4 + line_gap,
+                               bounds.bottom - margin)};
+    }
+
+    static bool contains(const RECT& bounds, int x, int y) noexcept {
+        return x >= bounds.left && x < bounds.right && y >= bounds.top &&
+               y < bounds.bottom;
+    }
+
+    void begin_analysis(metadb_handle_ptr track) {
+        core_api::ensure_main_thread();
+        ++analysis_generation_;
+        waveform_.reset();
+        analysis_error_.clear();
+        reset_view_values();
+
+        try {
+            current_identity_ =
+                loop_finder::foobar::make_track_identity(track);
+            if (current_identity_.empty()) {
+                throw std::runtime_error("Track identity is unavailable");
+            }
+            if (auto cached = waveform_cache_.find(current_identity_)) {
+                analysis_.cancel();
+                waveform_ = std::move(cached);
+                waveform_state_ = WaveformState::available;
+                sync_cursor_timer();
+                redraw();
+                return;
+            }
+
+            waveform_state_ = WaveformState::analyzing;
+            analysis_.request(
+                analysis_generation_, current_identity_, std::move(track));
+        } catch (const std::exception& exception) {
+            analysis_.cancel();
+            waveform_state_ = WaveformState::unavailable;
+            analysis_error_ = exception.what();
+        }
+        sync_cursor_timer();
+        redraw();
+    }
+
+    void clear_analysis() {
+        core_api::ensure_main_thread();
+        ++analysis_generation_;
+        current_identity_.clear();
+        waveform_.reset();
+        waveform_state_ = WaveformState::no_track;
+        analysis_error_.clear();
+        reset_view_values();
+        analysis_.cancel();
+        sync_cursor_timer();
+    }
+
+    void on_analysis_complete(
+        std::uint64_t generation,
+        const std::string& identity,
+        loop_finder::foobar::WaveformSnapshotPtr snapshot,
+        const std::string& error) {
+        core_api::ensure_main_thread();
+        if (generation != analysis_generation_ || identity != current_identity_) {
+            return;
+        }
+
+        if (snapshot) {
+            waveform_cache_.store(identity, snapshot);
+            waveform_ = std::move(snapshot);
+            waveform_state_ = WaveformState::available;
+            analysis_error_.clear();
+        } else {
+            waveform_.reset();
+            waveform_state_ = WaveformState::unavailable;
+            analysis_error_ = error.empty() ? "Decoder returned no waveform" : error;
+        }
+        sync_cursor_timer();
+        redraw();
+    }
+
+    void reset_view_values() noexcept {
+        view_begin_ = 0.0;
+        view_end_ = 1.0;
+    }
+
+    void reset_view() noexcept {
+        if (waveform_state_ != WaveformState::available) {
+            return;
+        }
+        reset_view_values();
+        redraw_waveform();
+    }
+
+    void on_mouse_wheel(WPARAM wparam, LPARAM lparam) noexcept {
+        if (waveform_state_ != WaveformState::available || !waveform_) {
+            return;
+        }
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(window_, &point);
+        const RECT bounds = waveform_bounds();
+        if (!contains(bounds, point.x, point.y) || bounds.right <= bounds.left) {
+            return;
+        }
+
+        const int wheel_delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        if (wheel_delta == 0) {
+            return;
+        }
+        const double steps =
+            static_cast<double>(wheel_delta) / static_cast<double>(WHEEL_DELTA);
+        const double current_width = view_end_ - view_begin_;
+        const double new_width = std::clamp(
+            current_width * std::pow(0.8, steps), 1.0 / 64.0, 1.0);
+        const double anchor = std::clamp(
+            static_cast<double>(point.x - bounds.left) /
+                static_cast<double>(bounds.right - bounds.left),
+            0.0,
+            1.0);
+        const double anchor_position = view_begin_ + anchor * current_width;
+        view_begin_ =
+            std::clamp(anchor_position - anchor * new_width, 0.0, 1.0 - new_width);
+        view_end_ = view_begin_ + new_width;
+        redraw_waveform();
+    }
+
+    void on_left_button_down(int x, int y) noexcept {
+        const RECT bounds = waveform_bounds();
+        if (waveform_state_ != WaveformState::available || !waveform_ ||
+            !contains(bounds, x, y)) {
+            return;
+        }
+        SetCapture(window_);
+        mouse_down_ = true;
+        dragging_ = false;
+        mouse_down_x_ = x;
+        drag_view_begin_ = view_begin_;
+        drag_view_end_ = view_end_;
+    }
+
+    void on_mouse_move(int x, int) noexcept {
+        if (!mouse_down_ || GetCapture() != window_) {
+            return;
+        }
+        const RECT bounds = waveform_bounds();
+        const int width = bounds.right - bounds.left;
+        if (width <= 0) {
+            return;
+        }
+        const int distance = x - mouse_down_x_;
+        if (!dragging_ &&
+            std::abs(distance) >= scale_for_dpi(3, window_dpi(window_))) {
+            dragging_ = true;
+        }
+        if (!dragging_) {
+            return;
+        }
+
+        const double view_width = drag_view_end_ - drag_view_begin_;
+        view_begin_ = std::clamp(
+            drag_view_begin_ - static_cast<double>(distance) /
+                                   static_cast<double>(width) * view_width,
+            0.0,
+            1.0 - view_width);
+        view_end_ = view_begin_ + view_width;
+        redraw_waveform();
+    }
+
+    void on_left_button_up(int x, int y) noexcept {
+        if (!mouse_down_) {
+            return;
+        }
+        const bool was_dragging = dragging_;
+        mouse_down_ = false;
+        dragging_ = false;
+        if (GetCapture() == window_) {
+            ReleaseCapture();
+        }
+        if (!was_dragging) {
+            seek_at(x, y);
+        }
+    }
+
+    void seek_at(int x, int y) noexcept {
+        const RECT bounds = waveform_bounds();
+        if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
+            !contains(bounds, x, y) || bounds.right <= bounds.left ||
+            !playback_->is_playing() || !playback_->playback_can_seek()) {
+            return;
+        }
+        const double relative = std::clamp(
+            static_cast<double>(x - bounds.left) /
+                static_cast<double>(bounds.right - bounds.left),
+            0.0,
+            1.0);
+        const double normalized =
+            view_begin_ + relative * (view_end_ - view_begin_);
+        playback_->playback_seek(normalized * waveform_->duration_seconds);
+    }
+
+    void update_playback_cursor() noexcept {
+        core_api::ensure_main_thread();
+        if (playback_state_ != PlaybackState::playing ||
+            !playback_->is_playing()) {
+            sync_cursor_timer();
+            return;
+        }
+        playback_position_ = playback_->playback_get_position();
+        redraw_waveform();
+    }
+
+    void sync_cursor_timer() noexcept {
+        if (window_ == nullptr) {
+            return;
+        }
+        if (playback_state_ == PlaybackState::playing &&
+            waveform_state_ == WaveformState::available) {
+            SetTimer(window_,
+                     kCursorTimer,
+                     kCursorTimerMilliseconds,
+                     nullptr);
+        } else {
+            KillTimer(window_, kCursorTimer);
+        }
+    }
+
     void refresh_playback_snapshot() {
         core_api::ensure_main_thread();
 
@@ -321,6 +810,7 @@ private:
 
         playback_state_ = playback_->is_paused() ? PlaybackState::paused
                                                  : PlaybackState::playing;
+        playback_position_ = playback_->playback_get_position();
         pfc::string8 title;
         if (playback_->playback_format_title(nullptr,
                                              title,
@@ -332,6 +822,7 @@ private:
         } else {
             track_title_ = "Opening...";
         }
+        sync_cursor_timer();
         redraw();
     }
 
@@ -341,22 +832,33 @@ private:
         }
     }
 
+    void redraw_waveform() noexcept {
+        if (window_ != nullptr) {
+            const RECT bounds = waveform_bounds();
+            InvalidateRect(window_, &bounds, FALSE);
+        }
+    }
+
     void on_playback_starting(play_control::t_track_command, bool paused) override {
         core_api::ensure_main_thread();
         playback_state_ =
             paused ? PlaybackState::paused : PlaybackState::playing;
         track_title_ = "Opening...";
+        clear_analysis();
         redraw();
     }
 
-    void on_playback_new_track(metadb_handle_ptr) override {
+    void on_playback_new_track(metadb_handle_ptr track) override {
         refresh_playback_snapshot();
+        begin_analysis(std::move(track));
     }
 
     void on_playback_stop(play_control::t_stop_reason) override {
         core_api::ensure_main_thread();
         playback_state_ = PlaybackState::stopped;
         track_title_ = "No track";
+        playback_position_ = 0.0;
+        clear_analysis();
         redraw();
     }
 
@@ -364,8 +866,21 @@ private:
         refresh_playback_snapshot();
     }
 
-    void on_playback_edited(metadb_handle_ptr) override {
+    void on_playback_seek(double time) override {
+        core_api::ensure_main_thread();
+        playback_position_ = time;
+        redraw_waveform();
+    }
+
+    void on_playback_time(double time) override {
+        core_api::ensure_main_thread();
+        playback_position_ = time;
+        redraw_waveform();
+    }
+
+    void on_playback_edited(metadb_handle_ptr track) override {
         refresh_playback_snapshot();
+        begin_analysis(std::move(track));
     }
 
     void on_playback_dynamic_info_track(const file_info&) override {
@@ -379,6 +894,21 @@ private:
     titleformat_object::ptr title_script_;
     pfc::string8 track_title_ = "No track";
     PlaybackState playback_state_ = PlaybackState::stopped;
+    WaveformState waveform_state_ = WaveformState::no_track;
+    double playback_position_ = 0.0;
+    double view_begin_ = 0.0;
+    double view_end_ = 1.0;
+    double drag_view_begin_ = 0.0;
+    double drag_view_end_ = 1.0;
+    int mouse_down_x_ = 0;
+    bool mouse_down_ = false;
+    bool dragging_ = false;
+    std::uint64_t analysis_generation_ = 0;
+    std::string current_identity_;
+    std::string analysis_error_;
+    loop_finder::foobar::WaveformSnapshotPtr waveform_;
+    loop_finder::foobar::WaveformCache waveform_cache_{8};
+    loop_finder::foobar::WaveformAnalysis analysis_;
 };
 
 // The SDK's ui_element_impl helper uses ATL/WTL. This equivalent lifetime
@@ -457,7 +987,7 @@ public:
     }
 
     bool get_description(pfc::string_base& output) override {
-        output = "Shows the current track and playback state for Loop Finder.";
+        output = "Shows an interactive waveform for the current local track.";
         return true;
     }
 };

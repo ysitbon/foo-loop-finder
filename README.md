@@ -13,12 +13,26 @@ drum patterns over them.
 - Opt-in loop transport, always disabled on startup
 - Platform-independent core with unit tests
 - Installable x64 foobar2000 component registration
-- Default UI panel shell with current title and playback state
+- Default UI panel with current title, playback state and entire-track waveform
+- Smooth playback cursor, click-to-seek, wheel zoom and drag navigation
+- Cancellable background decoding and an eight-track in-memory waveform cache
 
 The native component registers **Loop Finder 0.1.0** and provides a **Loop
 Finder** Default UI element. The panel displays the current title,
-Playing/Paused/Stopped state, and **Loop: Off**. It does not yet provide loop
-controls, waveform rendering or seeking; looping remains disabled by default.
+Playing/Paused/Stopped state, **Loop: Off**, analysis status, the current local
+track's waveform and playback cursor. Looping remains disabled by default.
+
+Waveform interactions:
+
+- Click the waveform to seek when foobar2000 reports the track as seekable.
+- Turn the mouse wheel over the waveform to zoom around the pointer, up to 64x.
+- Drag horizontally to navigate a zoomed view.
+- Double-click to restore the whole-track overview.
+
+Analysis is intentionally limited to decoder-supported local tracks with a
+positive known duration. Remote, unsupported, zero-length and unknown-length
+sources show **Analysis unavailable** and do not affect playback. The cache is
+memory-only and is cleared when the panel/component session ends.
 
 ## Windows build
 
@@ -81,9 +95,8 @@ ctest --test-dir build\core --output-on-failure
 
 ## Roadmap
 
-1. Validate the Default UI panel shell in foobar2000
-2. Decode the current track in the background and cache its waveform
-3. Add BPM, offset, IN/OUT and opt-in Loop controls
-4. Connect playback callbacks and seek from OUT to IN
-5. Add automatic BPM/beat detection
-6. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP
+1. Complete manual foobar2000 acceptance of the waveform view
+2. Add BPM, offset, IN/OUT and opt-in Loop controls
+3. Connect playback callbacks and seek from OUT to IN
+4. Add automatic BPM/beat detection
+5. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP

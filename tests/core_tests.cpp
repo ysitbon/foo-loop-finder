@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <span>
 #include <vector>
 
 namespace {
@@ -47,6 +48,37 @@ int main() {
     check(near(waveform[0].minimum, -1.0) && near(waveform[0].maximum, 0.5),
           "first waveform extrema retained");
 
+    check(reduce_waveform({}, 1, 10).empty(), "empty PCM produces no bins");
+    check(reduce_waveform({stereo.data(), stereo.size()}, 2, 20).size() == 4,
+          "short PCM does not invent source bins");
+
+    const std::vector<float> mono{-1.0F, -0.5F, 0.5F, 1.0F};
+    auto mono_waveform = reduce_waveform(mono, 1, 4);
+    check(mono_waveform.size() == 4 &&
+              near(mono_waveform.front().minimum, -1.0),
+          "mono PCM is reduced");
+
+    StreamingWaveformReducer streaming(2);
+    streaming.append(std::span<const float>(stereo.data(), 4), 2);
+    streaming.append(std::span<const float>(stereo.data() + 4, 4), 2);
+    auto streamed = streaming.finish();
+    check(streaming.frame_count() == 4 && streamed.size() == 2,
+          "stereo PCM chunks stream into bounded waveform bins");
+    check(near(streamed.front().minimum, -1.0) &&
+              near(streamed.back().maximum, 1.0),
+          "streaming reduction preserves extrema");
+
+    StreamingWaveformReducer empty_stream(8);
+    check(empty_stream.finish().empty(), "empty streamed PCM stays empty");
+
+    auto expanded = resample_waveform(streamed, 0.0, 1.0, 8);
+    check(expanded.size() == 8,
+          "waveform resampling supports widths larger than cached bins");
+    auto selected = resample_waveform(streamed, 0.5, 1.0, 3);
+    check(selected.size() == 3 && near(selected.front().maximum, 1.0),
+          "waveform view selection resamples the requested range");
+    check(resample_waveform(streamed, 0.8, 0.2, 3).empty(),
+          "invalid waveform view does not mutate or produce output");
+
     std::cout << "All loop finder core tests passed\n";
 }
-

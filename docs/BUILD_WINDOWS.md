@@ -103,9 +103,9 @@ references:
 - `foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj`
 - `foobar2000\shared\shared-x64.lib`
 
-It compiles `src\foobar\component.cpp`, `src\foobar\ui_element.cpp` and the
-existing platform-independent core sources. It does not copy or modify SDK
-sources.
+It compiles `src\foobar\component.cpp`, `src\foobar\ui_element.cpp`,
+`src\foobar\waveform_analysis.cpp` and the platform-independent core sources.
+It does not copy or modify SDK sources.
 
 The official SDK's Win32/x64 project configurations name toolset `v142` for
 Visual Studio 2019 compatibility. Passing `PlatformToolset=v143` as a global
@@ -121,9 +121,44 @@ prompted. Return to **Preferences → Components** and confirm that **Loop Finde
 
 After restart, enable Default UI layout editing, add **Loop Finder** from the
 **Playback Information** group, then disable layout editing. The panel displays
-the current track title, Playing/Paused/Stopped state, and **Loop: Off**.
-Looping remains disabled by default and the panel does not yet provide loop
-controls.
+the current track title, Playing/Paused/Stopped state, **Loop: Off**, waveform
+analysis status, waveform and playback cursor. Looping remains disabled by
+default and the panel does not yet provide loop controls.
+
+The waveform opens as a whole-track overview. Click to seek, use the mouse
+wheel over it to zoom, drag horizontally to navigate, and double-click to reset
+the overview. Seeking is ignored for tracks foobar2000 reports as unseekable.
+
+Waveform analysis supports local tracks handled by an installed foobar2000
+decoder and requires a positive known duration. Remote, unsupported,
+zero-length and unknown-length sources display an unavailable/error state.
+Waveforms are cached only in memory for up to eight tracks.
+
+## M3 manual verification
+
+The Release build and package check do not replace this runtime test:
+
+1. Start a supported local track that is not cached; confirm **Analyzing...**
+   appears, playback stays responsive, then the entire-track waveform appears.
+2. Switch rapidly between several local tracks while analysis is active;
+   confirm only the current track's waveform appears and there is no crash.
+3. Pause and resume; confirm the cursor stops while paused and continues
+   smoothly from the correct position after resume.
+4. Click several waveform positions; confirm playback seeks to the matching
+   time. Also try an unseekable source and confirm the click is safely ignored.
+5. Turn the wheel over the waveform to zoom, drag horizontally to navigate,
+   then double-click and confirm the whole-track overview returns.
+6. Resize the panel at whole-track and zoomed views; confirm the waveform
+   resamples cleanly and interactions still map to the visible time range.
+7. Change foobar2000 theme/colors and move between tested DPI settings; confirm
+   text, waveform, cursor, spacing and hit targets remain usable.
+8. Stop playback during analysis and after analysis; confirm **No track** is
+   shown, cursor updates stop, and no late waveform appears.
+9. Restart foobar2000; confirm startup is stable, **Loop: Off** remains, and a
+   local track is analyzed again because the cache is intentionally in-memory.
+10. During first-time analysis while playback runs, monitor CPU usage and UI /
+    audio responsiveness; confirm no stalls, dropouts or excessive sustained
+    redraw activity.
 
 ## Common errors
 
