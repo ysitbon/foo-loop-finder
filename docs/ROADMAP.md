@@ -66,18 +66,21 @@ the fixes without crashes, stale results or playback/UI regressions.
 
 ## M4 — Manual rhythmic loop editor
 
-- [ ] Add editable BPM with validation from 20 to 300.
-- [ ] Add tap tempo.
-- [ ] Render beat and emphasized bar grid lines.
-- [ ] Add adjustable grid phase/offset.
-- [ ] Add snapping divisions and a free-placement mode.
-- [ ] Add draggable IN and OUT markers.
-- [ ] Display loop duration in time, beats and bars.
-- [ ] Add a Loop toggle that is disabled by default.
-- [ ] Persist per-track grid and marker state without persisting active Loop.
+- [x] Add editable BPM with validation from 20 to 300.
+- [x] Add tap tempo.
+- [x] Render beat and emphasized bar grid lines.
+- [x] Add adjustable grid phase/offset.
+- [x] Add snapping divisions and a free-placement mode.
+- [x] Add draggable IN and OUT markers.
+- [x] Display loop duration in time, beats and bars.
+- [x] Add a Loop toggle that is disabled by default.
+- [x] Persist per-track grid and marker state without persisting active Loop.
 
 Acceptance evidence: edit a loop visually, reload the track and confirm markers
-return while Loop remains disabled.
+return while Loop remains disabled. Implementation evidence is complete: core
+tests pass, Release x64 builds against SDK 2025-03-07 and package inspection
+places the DLL at the archive root. Runtime acceptance remains pending manual
+foobar2000 testing; M4 is not accepted on build evidence alone.
 
 ## M5 — Playback looping
 
@@ -127,5 +130,6 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Begin M4 with validated editable BPM input from 20 to 300 while preserving the
-existing waveform behavior and keeping Loop disabled by default.
+Manually test and accept M4 in foobar2000, including persistence across restart,
+Loop remaining Off, theme/DPI/layout behavior and M3 responsiveness. Do not
+begin M5 playback looping until this acceptance is complete.

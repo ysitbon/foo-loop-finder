@@ -1,18 +1,34 @@
 #ifdef _WIN32
 #include <foobar2000/SDK/foobar2000.h>
 
+#include "editor_persistence.hpp"
 #include "waveform_analysis.hpp"
 
+#include "loop_finder/beat_grid.hpp"
+#include "loop_finder/loop_engine.hpp"
+#include "loop_finder/tap_tempo.hpp"
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cwchar>
+#include <cwctype>
+#include <iomanip>
+#include <iterator>
+#include <locale.h>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+#include <CommCtrl.h>
 #include <windowsx.h>
+
+#pragma comment(lib, "Comctl32.lib")
 
 namespace {
 
@@ -26,6 +42,17 @@ constexpr wchar_t kLoopFinderWindowClass[] =
     L"{7EFA898C-73E2-4C7F-AC87-21C7A5E87422}";
 constexpr UINT_PTR kCursorTimer = 1;
 constexpr UINT kCursorTimerMilliseconds = 50;
+constexpr UINT_PTR kControlSubclassId = 1;
+
+enum ControlId : int {
+    kBpmEdit = 1001,
+    kTapButton,
+    kOffsetEdit,
+    kSnapCombo,
+    kSetInButton,
+    kSetOutButton,
+    kLoopCheckbox,
+};
 
 UINT window_dpi(HWND window) noexcept {
     using GetDpiForWindowFunction = UINT(WINAPI*)(HWND);
@@ -64,6 +91,21 @@ COLORREF blend_colors(COLORREF foreground, COLORREF background) noexcept {
                blend_channel(GetBValue(foreground), GetBValue(background)));
 }
 
+COLORREF mix_colors(COLORREF foreground,
+                    COLORREF background,
+                    unsigned foreground_parts,
+                    unsigned total_parts = 8U) noexcept {
+    const auto channel = [&](BYTE front, BYTE back) noexcept -> BYTE {
+        return static_cast<BYTE>(
+            (static_cast<unsigned>(front) * foreground_parts +
+             static_cast<unsigned>(back) * (total_parts - foreground_parts)) /
+            total_parts);
+    };
+    return RGB(channel(GetRValue(foreground), GetRValue(background)),
+               channel(GetGValue(foreground), GetGValue(background)),
+               channel(GetBValue(foreground), GetBValue(background)));
+}
+
 class LoopFinderPanel : public ui_element_instance,
                         private play_callback_impl_base {
 public:
@@ -92,10 +134,12 @@ public:
 
     ~LoopFinderPanel() {
         core_api::ensure_main_thread();
+        cancel_interaction(true);
         analysis_.cancel();
         if (window_ != nullptr) {
             KillTimer(window_, kCursorTimer);
         }
+        discard_background_brush();
         discard_waveform_layer();
     }
 
@@ -104,10 +148,11 @@ public:
         ensure_window_class();
 
         const HWND window = CreateWindowExW(
-            0,
+            WS_EX_CONTROLPARENT,
             kLoopFinderWindowClass,
             L"Loop Finder",
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN |
+                WS_CLIPSIBLINGS,
             0,
             0,
             0,
@@ -120,10 +165,17 @@ public:
             throw std::runtime_error("Could not create the Loop Finder UI element window.");
         }
 
+        create_controls();
+        update_control_font();
+        layout_controls();
+
         refresh_playback_snapshot();
         metadb_handle_ptr current;
         if (playback_->get_now_playing(current)) {
+            load_editor_for_track(current);
             begin_analysis(std::move(current));
+        } else {
+            sync_controls();
         }
     }
 
@@ -154,8 +206,8 @@ public:
     ui_element_min_max_info get_min_max_info() override {
         ui_element_min_max_info result;
         const UINT dpi = window_dpi(window_);
-        result.m_min_width = static_cast<t_uint32>(scale_for_dpi(240, dpi));
-        result.m_min_height = static_cast<t_uint32>(scale_for_dpi(180, dpi));
+        result.m_min_width = static_cast<t_uint32>(scale_for_dpi(560, dpi));
+        result.m_min_height = static_cast<t_uint32>(scale_for_dpi(380, dpi));
         result.adjustForWindow(window_);
         return result;
     }
@@ -167,7 +219,10 @@ public:
         core_api::ensure_main_thread();
         if (what == ui_element_notify_colors_changed ||
             what == ui_element_notify_font_changed) {
-            redraw();
+            discard_background_brush();
+            update_control_font();
+            layout_controls();
+            redraw(true);
         }
     }
 
@@ -183,6 +238,14 @@ private:
         analyzing,
         available,
         unavailable,
+    };
+
+    enum class Interaction {
+        none,
+        pending_pan,
+        panning,
+        marker_in,
+        marker_out,
     };
 
     static void ensure_window_class() {
@@ -234,7 +297,26 @@ private:
 
         case WM_SIZE:
             panel->discard_waveform_layer();
+            panel->layout_controls();
             return 0;
+
+        case WM_COMMAND:
+            panel->on_command(LOWORD(wparam), HIWORD(wparam));
+            return 0;
+
+        case WM_KEYDOWN:
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+                (wparam == 'T' || wparam == 't')) {
+                panel->record_tap();
+                return 0;
+            }
+            break;
+
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLORLISTBOX:
+            return panel->control_color(reinterpret_cast<HDC>(wparam));
 
         case WM_TIMER:
             if (wparam == kCursorTimer) {
@@ -262,23 +344,26 @@ private:
             return 0;
 
         case WM_LBUTTONDBLCLK:
-            panel->reset_view();
+            panel->on_double_click(GET_X_LPARAM(lparam),
+                                   GET_Y_LPARAM(lparam));
             return 0;
 
         case WM_CAPTURECHANGED:
-            panel->mouse_down_ = false;
-            panel->dragging_ = false;
+            panel->on_capture_lost();
             return 0;
 
         case WM_DPICHANGED:
         case 0x02E3: // WM_DPICHANGED_AFTERPARENT
             panel->discard_waveform_layer();
+            panel->update_control_font();
+            panel->layout_controls();
             panel->callback_->on_min_max_info_change();
-            panel->redraw();
+            panel->redraw(true);
             return 0;
 
         case WM_NCDESTROY: {
             KillTimer(window, kCursorTimer);
+            panel->cancel_interaction(false);
             const LRESULT result =
                 DefWindowProcW(window, message, wparam, lparam);
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
@@ -290,6 +375,649 @@ private:
             return DefWindowProcW(window, message, wparam, lparam);
         }
         return DefWindowProcW(window, message, wparam, lparam);
+    }
+
+    struct PanelLayout {
+        int margin{};
+        int line_height{};
+        int control_height{};
+        int row_one_y{};
+        int row_two_y{};
+        RECT bpm_label{};
+        RECT offset_label{};
+        RECT snap_label{};
+        RECT feedback{};
+        RECT marker_info{};
+        RECT duration_info{};
+        RECT waveform{};
+    };
+
+    static LRESULT CALLBACK control_subclass_proc(HWND control,
+                                                   UINT message,
+                                                   WPARAM wparam,
+                                                   LPARAM lparam,
+                                                   UINT_PTR,
+                                                   DWORD_PTR reference) noexcept {
+        auto* panel = reinterpret_cast<LoopFinderPanel*>(reference);
+        if (message == WM_KEYDOWN) {
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+                (wparam == 'T' || wparam == 't')) {
+                panel->record_tap();
+                return 0;
+            }
+            if (control == panel->bpm_edit_ || control == panel->offset_edit_) {
+                if (wparam == VK_RETURN) {
+                    if (control == panel->bpm_edit_) panel->commit_bpm();
+                    else panel->commit_offset();
+                    return 0;
+                }
+                if (wparam == VK_ESCAPE) {
+                    panel->restore_edit(control);
+                    return 0;
+                }
+            }
+        } else if (message == WM_NCDESTROY) {
+            RemoveWindowSubclass(control,
+                                 &LoopFinderPanel::control_subclass_proc,
+                                 kControlSubclassId);
+        }
+        return DefSubclassProc(control, message, wparam, lparam);
+    }
+
+    HWND create_control(DWORD extended_style,
+                        const wchar_t* class_name,
+                        const wchar_t* text,
+                        DWORD style,
+                        int identifier) {
+        HWND control = CreateWindowExW(
+            extended_style,
+            class_name,
+            text,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+            0,
+            0,
+            0,
+            0,
+            window_,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)),
+            core_api::get_my_instance(),
+            nullptr);
+        if (control == nullptr) {
+            throw std::runtime_error("Could not create a Loop Finder editor control.");
+        }
+        SetWindowSubclass(control,
+                          &LoopFinderPanel::control_subclass_proc,
+                          kControlSubclassId,
+                          reinterpret_cast<DWORD_PTR>(this));
+        return control;
+    }
+
+    void create_controls() {
+        bpm_edit_ = create_control(WS_EX_CLIENTEDGE,
+                                   L"EDIT",
+                                   L"120",
+                                   ES_AUTOHSCROLL,
+                                   kBpmEdit);
+        tap_button_ = create_control(0,
+                                     L"BUTTON",
+                                     L"&Tap",
+                                     BS_PUSHBUTTON,
+                                     kTapButton);
+        offset_edit_ = create_control(WS_EX_CLIENTEDGE,
+                                      L"EDIT",
+                                      L"0",
+                                      ES_AUTOHSCROLL,
+                                      kOffsetEdit);
+        snap_combo_ = create_control(0,
+                                     WC_COMBOBOXW,
+                                     L"",
+                                     CBS_DROPDOWNLIST | WS_VSCROLL,
+                                     kSnapCombo);
+        for (const wchar_t* option : {L"Off / free",
+                                      L"1 beat",
+                                      L"1/2 beat",
+                                      L"1/4 beat",
+                                      L"1/8 beat",
+                                      L"1/16 beat"}) {
+            SendMessageW(snap_combo_, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(option));
+        }
+        set_in_button_ = create_control(0,
+                                        L"BUTTON",
+                                        L"Set &IN",
+                                        BS_PUSHBUTTON,
+                                        kSetInButton);
+        set_out_button_ = create_control(0,
+                                         L"BUTTON",
+                                         L"Set &OUT",
+                                         BS_PUSHBUTTON,
+                                         kSetOutButton);
+        loop_checkbox_ = create_control(0,
+                                        L"BUTTON",
+                                        L"&Loop (editor only)",
+                                        BS_AUTOCHECKBOX,
+                                        kLoopCheckbox);
+        SendMessageW(bpm_edit_, EM_SETCUEBANNER, FALSE,
+                     reinterpret_cast<LPARAM>(L"20-300"));
+        SendMessageW(offset_edit_, EM_SETCUEBANNER, FALSE,
+                     reinterpret_cast<LPARAM>(L"milliseconds"));
+    }
+
+    PanelLayout panel_layout() const noexcept {
+        PanelLayout layout;
+        RECT bounds{};
+        if (window_ == nullptr || !GetClientRect(window_, &bounds)) {
+            return layout;
+        }
+        const UINT dpi = window_dpi(window_);
+        layout.margin = scale_for_dpi(12, dpi);
+        layout.line_height = waveform_line_height();
+        layout.control_height = (std::max)(scale_for_dpi(22, dpi),
+                                            layout.line_height -
+                                                scale_for_dpi(2, dpi));
+        const int gap = scale_for_dpi(6, dpi);
+        layout.row_one_y = bounds.top + layout.margin +
+                           layout.line_height * 3 + gap;
+        layout.row_two_y = layout.row_one_y + layout.line_height + gap;
+
+        int x = bounds.left + layout.margin;
+        layout.bpm_label = RECT{x, layout.row_one_y,
+                                x + scale_for_dpi(42, dpi),
+                                layout.row_one_y + layout.line_height};
+        x = layout.bpm_label.right + scale_for_dpi(4, dpi) +
+            scale_for_dpi(68, dpi) + scale_for_dpi(6, dpi) +
+            scale_for_dpi(54, dpi) + scale_for_dpi(12, dpi);
+        layout.offset_label = RECT{x, layout.row_one_y,
+                                   x + scale_for_dpi(82, dpi),
+                                   layout.row_one_y + layout.line_height};
+
+        x = bounds.left + layout.margin;
+        layout.snap_label = RECT{x, layout.row_two_y,
+                                 x + scale_for_dpi(42, dpi),
+                                 layout.row_two_y + layout.line_height};
+
+        const int feedback_top = layout.row_two_y + layout.line_height + gap;
+        layout.feedback = RECT{bounds.left + layout.margin,
+                               feedback_top,
+                               bounds.right - layout.margin,
+                               feedback_top + layout.line_height};
+        layout.marker_info = layout.feedback;
+        OffsetRect(&layout.marker_info, 0, layout.line_height);
+        layout.duration_info = layout.marker_info;
+        OffsetRect(&layout.duration_info, 0, layout.line_height);
+        const int waveform_top = layout.duration_info.bottom + gap;
+        layout.waveform = RECT{bounds.left + layout.margin,
+                               waveform_top,
+                               (std::max)(static_cast<int>(bounds.left) +
+                                              layout.margin,
+                                          static_cast<int>(bounds.right) -
+                                              layout.margin),
+                               (std::max)(waveform_top,
+                                          static_cast<int>(bounds.bottom) -
+                                              layout.margin)};
+        return layout;
+    }
+
+    void layout_controls() noexcept {
+        if (bpm_edit_ == nullptr) {
+            return;
+        }
+        auto layout = panel_layout();
+        const UINT dpi = window_dpi(window_);
+        const int gap = scale_for_dpi(6, dpi);
+        int x = layout.bpm_label.right + scale_for_dpi(4, dpi);
+        MoveWindow(bpm_edit_, x, layout.row_one_y,
+                   scale_for_dpi(68, dpi), layout.control_height, TRUE);
+        x += scale_for_dpi(68, dpi) + gap;
+        MoveWindow(tap_button_, x, layout.row_one_y,
+                   scale_for_dpi(54, dpi), layout.control_height, TRUE);
+        x = layout.offset_label.right + scale_for_dpi(4, dpi);
+        MoveWindow(offset_edit_, x, layout.row_one_y,
+                   scale_for_dpi(92, dpi), layout.control_height, TRUE);
+
+        x = layout.snap_label.right + scale_for_dpi(4, dpi);
+        MoveWindow(snap_combo_, x, layout.row_two_y,
+                   scale_for_dpi(118, dpi),
+                   scale_for_dpi(180, dpi), TRUE);
+        x += scale_for_dpi(118, dpi) + gap;
+        MoveWindow(set_in_button_, x, layout.row_two_y,
+                   scale_for_dpi(72, dpi), layout.control_height, TRUE);
+        x += scale_for_dpi(72, dpi) + gap;
+        MoveWindow(set_out_button_, x, layout.row_two_y,
+                   scale_for_dpi(78, dpi), layout.control_height, TRUE);
+        x += scale_for_dpi(78, dpi) + gap;
+        MoveWindow(loop_checkbox_, x, layout.row_two_y,
+                   scale_for_dpi(156, dpi), layout.control_height, TRUE);
+    }
+
+    void update_control_font() noexcept {
+        if (window_ == nullptr) {
+            return;
+        }
+        HFONT font = callback_->query_font_ex(ui_font_default);
+        if (font == nullptr) {
+            font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        }
+        for (HWND control : {bpm_edit_, tap_button_, offset_edit_, snap_combo_,
+                             set_in_button_, set_out_button_, loop_checkbox_}) {
+            if (control != nullptr) {
+                SendMessageW(control, WM_SETFONT,
+                             reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        }
+    }
+
+    void discard_background_brush() noexcept {
+        if (background_brush_ != nullptr) {
+            DeleteObject(background_brush_);
+            background_brush_ = nullptr;
+        }
+    }
+
+    LRESULT control_color(HDC dc) noexcept {
+        const COLORREF background =
+            callback_->query_std_color(ui_color_background);
+        const COLORREF foreground = callback_->query_std_color(ui_color_text);
+        SetBkColor(dc, background);
+        SetTextColor(dc, foreground);
+        if (background_brush_ == nullptr ||
+            background_brush_color_ != background) {
+            discard_background_brush();
+            background_brush_ = CreateSolidBrush(background);
+            background_brush_color_ = background;
+        }
+        return reinterpret_cast<LRESULT>(background_brush_);
+    }
+
+    static std::wstring format_number(double value, int precision = 8) {
+        std::wostringstream stream;
+        stream << std::setprecision(precision) << std::defaultfloat << value;
+        return stream.str();
+    }
+
+    static std::optional<double> parse_number(HWND edit) noexcept {
+        wchar_t buffer[128]{};
+        const int length = GetWindowTextW(edit, buffer,
+                                          static_cast<int>(std::size(buffer)));
+        if (length <= 0) {
+            return std::nullopt;
+        }
+        static _locale_t c_numeric_locale = _wcreate_locale(LC_NUMERIC, L"C");
+        wchar_t* end = nullptr;
+        const double value = c_numeric_locale != nullptr
+            ? _wcstod_l(buffer, &end, c_numeric_locale)
+            : std::wcstod(buffer, &end);
+        while (end != nullptr && *end != L'\0' && std::iswspace(*end)) {
+            ++end;
+        }
+        if (end == buffer || end == nullptr || *end != L'\0' ||
+            !std::isfinite(value)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    static int snap_combo_index(loop_finder::SnapMode mode) noexcept {
+        switch (mode) {
+        case loop_finder::SnapMode::off: return 0;
+        case loop_finder::SnapMode::beat: return 1;
+        case loop_finder::SnapMode::half_beat: return 2;
+        case loop_finder::SnapMode::quarter_beat: return 3;
+        case loop_finder::SnapMode::eighth_beat: return 4;
+        case loop_finder::SnapMode::sixteenth_beat: return 5;
+        }
+        return 0;
+    }
+
+    static loop_finder::SnapMode snap_mode_at(int index) noexcept {
+        switch (index) {
+        case 1: return loop_finder::SnapMode::beat;
+        case 2: return loop_finder::SnapMode::half_beat;
+        case 3: return loop_finder::SnapMode::quarter_beat;
+        case 4: return loop_finder::SnapMode::eighth_beat;
+        case 5: return loop_finder::SnapMode::sixteenth_beat;
+        default: return loop_finder::SnapMode::off;
+        }
+    }
+
+    static const wchar_t* snap_mode_text(loop_finder::SnapMode mode) noexcept {
+        switch (mode) {
+        case loop_finder::SnapMode::off: return L"Off / free";
+        case loop_finder::SnapMode::beat: return L"1 beat";
+        case loop_finder::SnapMode::half_beat: return L"1/2 beat";
+        case loop_finder::SnapMode::quarter_beat: return L"1/4 beat";
+        case loop_finder::SnapMode::eighth_beat: return L"1/8 beat";
+        case loop_finder::SnapMode::sixteenth_beat: return L"1/16 beat";
+        }
+        return L"Off / free";
+    }
+
+    void sync_controls() noexcept {
+        if (bpm_edit_ == nullptr) {
+            return;
+        }
+        updating_controls_ = true;
+        const auto& state = loop_engine_.state();
+        SetWindowTextW(bpm_edit_, format_number(state.bpm).c_str());
+        SetWindowTextW(offset_edit_,
+                       format_number(state.grid_offset_seconds * 1000.0,
+                                     10).c_str());
+        SendMessageW(snap_combo_, CB_SETCURSEL,
+                     snap_combo_index(loop_finder::snap_mode(state)), 0);
+        SendMessageW(loop_checkbox_, BM_SETCHECK,
+                     state.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        const BOOL enabled = current_track_.is_valid() ? TRUE : FALSE;
+        for (HWND control : {bpm_edit_, tap_button_, offset_edit_, snap_combo_,
+                             set_in_button_, set_out_button_, loop_checkbox_}) {
+            EnableWindow(control, enabled);
+        }
+        updating_controls_ = false;
+    }
+
+    void restore_edit(HWND edit) noexcept {
+        if (edit == bpm_edit_) {
+            SetWindowTextW(edit, format_number(loop_engine_.state().bpm).c_str());
+        } else if (edit == offset_edit_) {
+            SetWindowTextW(edit,
+                           format_number(
+                               loop_engine_.state().grid_offset_seconds * 1000.0,
+                               10).c_str());
+        }
+        editor_feedback_ = L"Last valid value restored";
+        redraw(false);
+    }
+
+    void commit_bpm() noexcept {
+        if (updating_controls_ || current_track_.is_empty()) {
+            return;
+        }
+        const auto value = parse_number(bpm_edit_);
+        if (!value.has_value()) {
+            editor_feedback_ = L"BPM must be a finite number from 20 to 300";
+            redraw(false);
+            return;
+        }
+        const auto result = loop_engine_.set_bpm(*value);
+        if (!result.valid) {
+            editor_feedback_ = L"BPM must be from 20 to 300";
+            redraw(false);
+            return;
+        }
+        SetWindowTextW(bpm_edit_,
+                       format_number(loop_engine_.state().bpm).c_str());
+        editor_feedback_ = L"BPM updated; markers were not moved";
+        persist_editor();
+        redraw(false);
+    }
+
+    void commit_offset() noexcept {
+        if (updating_controls_ || current_track_.is_empty()) {
+            return;
+        }
+        const auto milliseconds = parse_number(offset_edit_);
+        if (!milliseconds.has_value()) {
+            editor_feedback_ = L"Grid offset must be a finite millisecond value";
+            redraw(false);
+            return;
+        }
+        const auto result = loop_engine_.set_grid_offset(*milliseconds / 1000.0);
+        if (!result.valid) {
+            editor_feedback_ = L"Grid offset must be finite";
+            redraw(false);
+            return;
+        }
+        SetWindowTextW(offset_edit_,
+                       format_number(
+                           loop_engine_.state().grid_offset_seconds * 1000.0,
+                           10).c_str());
+        editor_feedback_ = L"Grid phase updated; markers were not moved";
+        persist_editor();
+        redraw(false);
+    }
+
+    void on_command(int identifier, int notification) noexcept {
+        if (updating_controls_) {
+            return;
+        }
+        switch (identifier) {
+        case kBpmEdit:
+            if (notification == EN_KILLFOCUS) commit_bpm();
+            break;
+        case kOffsetEdit:
+            if (notification == EN_KILLFOCUS) commit_offset();
+            break;
+        case kTapButton:
+            if (notification == BN_CLICKED) record_tap();
+            break;
+        case kSnapCombo:
+            if (notification == CBN_SELCHANGE) change_snapping();
+            break;
+        case kSetInButton:
+            if (notification == BN_CLICKED) set_marker_from_playback(true);
+            break;
+        case kSetOutButton:
+            if (notification == BN_CLICKED) set_marker_from_playback(false);
+            break;
+        case kLoopCheckbox:
+            if (notification == BN_CLICKED) change_loop_enabled();
+            break;
+        default:
+            break;
+        }
+    }
+
+    void record_tap() noexcept {
+        if (current_track_.is_empty()) {
+            return;
+        }
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto tap = tap_tempo_.tap(now);
+        if (!tap.bpm.has_value()) {
+            std::wostringstream feedback;
+            feedback << L"Tap tempo: " << tap.tap_count
+                     << L"/4 taps (Ctrl+T)";
+            if (tap.sequence_restarted) {
+                feedback << L" - new sequence after timeout";
+            }
+            editor_feedback_ = feedback.str();
+            redraw(false);
+            return;
+        }
+
+        const auto result = loop_engine_.set_bpm(*tap.bpm);
+        if (!result.valid) {
+            editor_feedback_ = L"Tapped tempo is outside 20-300 BPM";
+            redraw(false);
+            return;
+        }
+        SetWindowTextW(bpm_edit_,
+                       format_number(loop_engine_.state().bpm, 6).c_str());
+        std::wostringstream feedback;
+        feedback << L"Tap tempo: " << std::fixed << std::setprecision(2)
+                 << loop_engine_.state().bpm << L" BPM (Ctrl+T)";
+        editor_feedback_ = feedback.str();
+        persist_editor();
+        redraw(false);
+    }
+
+    void change_snapping() noexcept {
+        if (current_track_.is_empty()) {
+            return;
+        }
+        const int selected = static_cast<int>(
+            SendMessageW(snap_combo_, CB_GETCURSEL, 0, 0));
+        const auto result = loop_engine_.set_snapping(snap_mode_at(selected));
+        if (!result.valid) {
+            editor_feedback_ = L"Unsupported snapping selection";
+            sync_controls();
+            redraw(false);
+            return;
+        }
+        editor_feedback_ = L"Snapping changed; existing markers were not moved";
+        persist_editor();
+        redraw(false);
+    }
+
+    double track_duration() const noexcept {
+        if (waveform_ && std::isfinite(waveform_->duration_seconds) &&
+            waveform_->duration_seconds > 0.0) {
+            return waveform_->duration_seconds;
+        }
+        if (current_track_.is_valid()) {
+            try {
+                const double duration = current_track_->get_length();
+                if (std::isfinite(duration) && duration > 0.0) {
+                    return duration;
+                }
+            } catch (...) {
+            }
+        }
+        return 0.0;
+    }
+
+    void set_marker_from_playback(bool is_in) noexcept {
+        const double duration = track_duration();
+        if (duration <= 0.0) {
+            editor_feedback_ = L"Markers require a track with a known duration";
+            redraw(false);
+            return;
+        }
+        const auto result = is_in
+            ? loop_engine_.set_in_clamped(playback_position_, duration)
+            : loop_engine_.set_out_clamped(playback_position_, duration);
+        if (!result.valid) {
+            editor_feedback_ = is_in
+                ? L"IN was rejected: it must remain before OUT"
+                : L"OUT was rejected: it must remain after IN";
+            redraw(false);
+            return;
+        }
+        editor_feedback_ = is_in ? L"IN set from playback position"
+                                 : L"OUT set from playback position";
+        persist_editor();
+        redraw(false);
+    }
+
+    void change_loop_enabled() noexcept {
+        const bool requested =
+            SendMessageW(loop_checkbox_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const auto result = loop_engine_.set_enabled(requested);
+        if (!result.valid) {
+            editor_feedback_ = L"Loop could not be armed with invalid markers";
+            sync_controls();
+            redraw(false);
+            return;
+        }
+        editor_feedback_ = requested
+            ? L"Loop armed in editor only - audible looping arrives in M5"
+            : L"Loop disarmed";
+        redraw(false);
+    }
+
+    void persist_editor() noexcept {
+        if (current_track_.is_empty()) {
+            return;
+        }
+        std::string error;
+        if (!loop_finder::foobar::EditorPersistence::save(
+                current_track_, loop_engine_.state(), error)) {
+            const pfc::stringcvt::string_wide_from_utf8 wide(error.c_str());
+            editor_feedback_ = std::wstring(L"Persistence: ") + wide.get_ptr();
+        }
+    }
+
+    void load_editor_for_track(const metadb_handle_ptr& track) noexcept {
+        cancel_interaction(true);
+        current_track_ = track;
+        tap_tempo_.reset();
+        std::string warning;
+        auto saved = loop_finder::foobar::EditorPersistence::load(track, warning);
+        loop_finder::LoopEngine next(saved.has_value()
+                                         ? *saved
+                                         : loop_finder::LoopState{});
+
+        double duration = 0.0;
+        try {
+            duration = track->get_length();
+        } catch (...) {
+        }
+        if (std::isfinite(duration) && duration > 0.0) {
+            clamp_engine_to_duration(next, duration);
+        }
+        loop_engine_ = next;
+        (void)loop_engine_.set_enabled(false);
+        if (!warning.empty()) {
+            const pfc::stringcvt::string_wide_from_utf8 wide(warning.c_str());
+            editor_feedback_ = wide.get_ptr();
+        } else if (saved.has_value()) {
+            editor_feedback_ = L"Saved grid and markers restored; Loop remains Off";
+        } else {
+            editor_feedback_ =
+                L"Editor ready - Ctrl+T taps tempo; Loop audio arrives in M5";
+        }
+        sync_controls();
+    }
+
+    static void clamp_engine_to_duration(loop_finder::LoopEngine& engine,
+                                         double duration) noexcept {
+        if (!std::isfinite(duration) || duration <= 0.0) {
+            return;
+        }
+        const double in_seconds = engine.state().in_seconds;
+        const double out_seconds = engine.state().out_seconds;
+        if (!engine.set_markers_clamped(in_seconds,
+                                        out_seconds,
+                                        duration).valid) {
+            (void)engine.set_markers(0.0, duration);
+        }
+    }
+
+    void clear_editor() noexcept {
+        cancel_interaction(true);
+        current_track_.release();
+        loop_engine_ = loop_finder::LoopEngine{};
+        tap_tempo_.reset();
+        editor_feedback_ = L"No track - Loop Off";
+        sync_controls();
+    }
+
+    static std::wstring format_timecode(double seconds) {
+        seconds = (std::max)(0.0, seconds);
+        const auto total_milliseconds = static_cast<long long>(
+            std::llround(seconds * 1000.0));
+        const auto minutes = total_milliseconds / 60000;
+        const auto whole_seconds = (total_milliseconds / 1000) % 60;
+        const auto milliseconds = total_milliseconds % 1000;
+        std::wostringstream output;
+        output << minutes << L':' << std::setw(2) << std::setfill(L'0')
+               << whole_seconds << L'.' << std::setw(3) << milliseconds;
+        return output.str();
+    }
+
+    std::wstring marker_info_text() const {
+        const auto& state = loop_engine_.state();
+        return std::wstring(L"IN ") + format_timecode(state.in_seconds) +
+               L"   OUT " + format_timecode(state.out_seconds) +
+               L"   Length " + format_timecode(loop_engine_.loop_length_seconds()) +
+               L" (" + format_number(loop_engine_.loop_length_seconds(), 7) + L" s)";
+    }
+
+    std::wstring duration_info_text() const {
+        std::wostringstream output;
+        output << std::setprecision(6) << loop_engine_.loop_length_beats()
+               << L" beats";
+        if (const auto bars = loop_engine_.loop_length_bars(); bars.has_value()) {
+            output << L" / " << *bars << L" bars in "
+                   << loop_engine_.state().beats_per_bar << L"/4";
+        } else {
+            output << L" / bars: - in " << loop_engine_.state().beats_per_bar
+                   << L"/4";
+        }
+        output << L"   BPM " << loop_engine_.state().bpm
+               << L"   Snap "
+               << snap_mode_text(loop_finder::snap_mode(loop_engine_.state()));
+        return output.str();
     }
 
     void paint() noexcept {
@@ -313,31 +1041,20 @@ private:
         }
         const HGDIOBJ previous_font = SelectObject(dc, font);
 
-        TEXTMETRICW metrics{};
-        GetTextMetricsW(dc, &metrics);
-        const UINT dpi = window_dpi(window_);
-        const int margin = scale_for_dpi(12, dpi);
-        const int line_gap = scale_for_dpi(5, dpi);
-        const int line_height =
-            (std::max)(scale_for_dpi(18, dpi),
-                       static_cast<int>(metrics.tmHeight) + line_gap);
+        auto layout = panel_layout();
         const UINT text_flags =
             DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
 
-        RECT line{bounds.left + margin,
-                  bounds.top + margin,
-                  (std::max)(bounds.left + margin, bounds.right - margin),
+        RECT line{bounds.left + layout.margin,
+                  bounds.top + layout.margin,
+                  (std::max)(bounds.left + layout.margin,
+                             bounds.right - layout.margin),
                   bounds.bottom};
-        RECT waveform{line.left,
-                      line.top + line_height * 4 + line_gap,
-                      (std::max)(line.left, bounds.right - margin),
-                      (std::max)(line.top + line_height * 4 + line_gap,
-                                 bounds.bottom - margin)};
         const bool waveform_only_paint =
-            paint_state.rcPaint.left >= waveform.left &&
-            paint_state.rcPaint.top >= waveform.top &&
-            paint_state.rcPaint.right <= waveform.right &&
-            paint_state.rcPaint.bottom <= waveform.bottom;
+            paint_state.rcPaint.left >= layout.waveform.left &&
+            paint_state.rcPaint.top >= layout.waveform.top &&
+            paint_state.rcPaint.right <= layout.waveform.right &&
+            paint_state.rcPaint.bottom <= layout.waveform.bottom;
 
         HFONT heading_font = nullptr;
         if (!waveform_only_paint) {
@@ -357,35 +1074,45 @@ private:
             if (heading_font != nullptr) {
                 SelectObject(dc, heading_font);
             }
-            line.bottom = line.top + line_height;
+            line.bottom = line.top + layout.line_height;
             DrawTextW(dc, L"Loop Finder", -1, &line, text_flags);
 
             SelectObject(dc, font);
-            line.top += line_height;
-            line.bottom = line.top + line_height;
+            line.top += layout.line_height;
+            line.bottom = line.top + layout.line_height;
             const pfc::stringcvt::string_wide_from_utf8 wide_title(track_title_);
             const std::wstring track_line =
                 std::wstring(L"Track: ") + wide_title.get_ptr();
             DrawTextW(dc, track_line.c_str(), -1, &line, text_flags);
 
-            line.top += line_height;
-            line.bottom = line.top + line_height;
+            line.top += layout.line_height;
+            line.bottom = line.top + layout.line_height;
             const std::wstring playback_line =
                 std::wstring(L"Playback: ") + playback_state_text();
             DrawTextW(dc, playback_line.c_str(), -1, &line, text_flags);
 
-            line.top += line_height;
-            line.bottom = line.top + line_height;
+            DrawTextW(dc, L"BPM:", -1, &layout.bpm_label, text_flags);
+            DrawTextW(dc, L"Offset ms:", -1, &layout.offset_label, text_flags);
+            DrawTextW(dc, L"Snap:", -1, &layout.snap_label, text_flags);
+
             SetTextColor(dc, blend_colors(foreground, background));
-            DrawTextW(dc, L"Loop: Off", -1, &line, text_flags);
+            DrawTextW(dc, editor_feedback_.c_str(), -1,
+                      &layout.feedback, text_flags);
+            SetTextColor(dc, foreground);
+            const std::wstring markers = marker_info_text();
+            DrawTextW(dc, markers.c_str(), -1,
+                      &layout.marker_info, text_flags);
+            const std::wstring duration = duration_info_text();
+            DrawTextW(dc, duration.c_str(), -1,
+                      &layout.duration_info, text_flags);
         }
 
         paint_waveform(dc,
-                       waveform,
+                       layout.waveform,
                        foreground,
                        background,
                        font,
-                       line_height);
+                       layout.line_height);
 
         if (heading_font != nullptr) {
             DeleteObject(heading_font);
@@ -406,12 +1133,12 @@ private:
             return;
         }
 
-        if (ensure_waveform_layer(
+        if (ensure_editor_layer(
                 dc, bounds, foreground, background, font, line_height)) {
             HDC memory_dc = CreateCompatibleDC(dc);
             if (memory_dc != nullptr) {
                 const HGDIOBJ previous =
-                    SelectObject(memory_dc, waveform_layer_bitmap_);
+                    SelectObject(memory_dc, editor_layer_bitmap_);
                 if (previous != nullptr && previous != HGDI_ERROR) {
                     BitBlt(dc,
                            bounds.left,
@@ -429,9 +1156,83 @@ private:
         } else {
             draw_waveform_layer(
                 dc, bounds, foreground, background, font, line_height);
+            draw_editor_overlays(dc,
+                                 waveform_graph_bounds(bounds, line_height),
+                                 foreground,
+                                 background,
+                                 font);
         }
 
-        draw_cursor(dc, waveform_graph_bounds(bounds, line_height));
+        const RECT graph = waveform_graph_bounds(bounds, line_height);
+        draw_cursor(dc, graph);
+    }
+
+    bool ensure_editor_layer(HDC target,
+                             const RECT& bounds,
+                             COLORREF foreground,
+                             COLORREF background,
+                             HFONT font,
+                             int line_height) noexcept {
+        const int width = bounds.right - bounds.left;
+        const int height = bounds.bottom - bounds.top;
+        if (!ensure_waveform_layer(target,
+                                   bounds,
+                                   foreground,
+                                   background,
+                                   font,
+                                   line_height)) {
+            return false;
+        }
+        if (!editor_layer_dirty_ && editor_layer_bitmap_ != nullptr &&
+            editor_layer_width_ == width && editor_layer_height_ == height) {
+            return true;
+        }
+
+        discard_editor_layer();
+        HDC memory_dc = CreateCompatibleDC(target);
+        HDC waveform_dc = CreateCompatibleDC(target);
+        HBITMAP bitmap = CreateCompatibleBitmap(target, width, height);
+        if (memory_dc == nullptr || waveform_dc == nullptr || bitmap == nullptr) {
+            if (bitmap != nullptr) DeleteObject(bitmap);
+            if (waveform_dc != nullptr) DeleteDC(waveform_dc);
+            if (memory_dc != nullptr) DeleteDC(memory_dc);
+            return false;
+        }
+        const HGDIOBJ previous_bitmap = SelectObject(memory_dc, bitmap);
+        const HGDIOBJ previous_waveform =
+            SelectObject(waveform_dc, waveform_layer_bitmap_);
+        if (previous_bitmap == nullptr || previous_bitmap == HGDI_ERROR ||
+            previous_waveform == nullptr || previous_waveform == HGDI_ERROR) {
+            if (previous_bitmap != nullptr && previous_bitmap != HGDI_ERROR) {
+                SelectObject(memory_dc, previous_bitmap);
+            }
+            if (previous_waveform != nullptr && previous_waveform != HGDI_ERROR) {
+                SelectObject(waveform_dc, previous_waveform);
+            }
+            DeleteObject(bitmap);
+            DeleteDC(waveform_dc);
+            DeleteDC(memory_dc);
+            return false;
+        }
+
+        BitBlt(memory_dc, 0, 0, width, height, waveform_dc, 0, 0, SRCCOPY);
+        SelectObject(memory_dc, font);
+        const RECT local_bounds{0, 0, width, height};
+        draw_editor_overlays(memory_dc,
+                             waveform_graph_bounds(local_bounds, line_height),
+                             foreground,
+                             background,
+                             font);
+
+        SelectObject(waveform_dc, previous_waveform);
+        SelectObject(memory_dc, previous_bitmap);
+        DeleteDC(waveform_dc);
+        DeleteDC(memory_dc);
+        editor_layer_bitmap_ = bitmap;
+        editor_layer_width_ = width;
+        editor_layer_height_ = height;
+        editor_layer_dirty_ = false;
+        return true;
     }
 
     bool ensure_waveform_layer(HDC target,
@@ -483,6 +1284,7 @@ private:
     }
 
     void discard_waveform_layer() noexcept {
+        discard_editor_layer();
         if (waveform_layer_bitmap_ != nullptr) {
             DeleteObject(waveform_layer_bitmap_);
             waveform_layer_bitmap_ = nullptr;
@@ -490,6 +1292,16 @@ private:
         waveform_layer_width_ = 0;
         waveform_layer_height_ = 0;
         waveform_layer_dirty_ = true;
+    }
+
+    void discard_editor_layer() noexcept {
+        if (editor_layer_bitmap_ != nullptr) {
+            DeleteObject(editor_layer_bitmap_);
+            editor_layer_bitmap_ = nullptr;
+        }
+        editor_layer_width_ = 0;
+        editor_layer_height_ = 0;
+        editor_layer_dirty_ = true;
     }
 
     void draw_waveform_layer(HDC dc,
@@ -592,7 +1404,7 @@ private:
                   bounds.bottom - 2};
         SetTextColor(dc, muted);
         DrawTextW(dc,
-                  L"Wheel: zoom  Drag: pan  Click: seek  Double-click: overview",
+                  L"Marker: drag  Empty: pan/seek  Wheel: zoom  Double-click: overview",
                   -1,
                   &help,
                   DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX |
@@ -600,11 +1412,165 @@ private:
     }
 
     static RECT waveform_graph_bounds(const RECT& bounds,
-                                      int line_height) noexcept {
+                                       int line_height) noexcept {
         return RECT{bounds.left + 2,
                     (std::min)(bounds.bottom, bounds.top + line_height),
                     bounds.right - 2,
                     bounds.bottom - line_height};
+    }
+
+    std::optional<int> time_x(double seconds, const RECT& graph) const noexcept {
+        if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
+            graph.right <= graph.left || graph.bottom <= graph.top) {
+            return std::nullopt;
+        }
+        const double normalized = seconds / waveform_->duration_seconds;
+        if (normalized < view_begin_ || normalized > view_end_) {
+            return std::nullopt;
+        }
+        const double relative =
+            (normalized - view_begin_) / (view_end_ - view_begin_);
+        return graph.left + static_cast<int>(relative *
+                                             (graph.right - graph.left - 1));
+    }
+
+    void draw_editor_overlays(HDC dc,
+                              const RECT& graph,
+                              COLORREF foreground,
+                              COLORREF background,
+                              HFONT font) noexcept {
+        if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
+            graph.right <= graph.left || graph.bottom <= graph.top) {
+            return;
+        }
+
+        const double duration = waveform_->duration_seconds;
+        const double from_seconds = view_begin_ * duration;
+        const double to_seconds = view_end_ * duration;
+        const double visible_seconds = to_seconds - from_seconds;
+        const int width = graph.right - graph.left;
+        if (visible_seconds <= 0.0 || width <= 0) {
+            return;
+        }
+
+        try {
+            const int grid_spacing =
+                (std::max)(1, scale_for_dpi(3, window_dpi(window_)));
+            const std::size_t maximum_lines = static_cast<std::size_t>(
+                (std::max)(1, width / grid_spacing));
+            const auto lines = loop_finder::grid_lines(from_seconds,
+                                                        to_seconds,
+                                                        loop_engine_.state(),
+                                                        maximum_lines);
+            const double beat_pixels = loop_finder::beat_duration(
+                loop_engine_.state().bpm) / visible_seconds * width;
+            const double subdivision_pixels = beat_pixels /
+                loop_engine_.state().subdivisions_per_beat;
+            const double minimum_pixels = scale_for_dpi(4, window_dpi(window_));
+
+            HPEN subdivision_pen = CreatePen(
+                PS_SOLID, 1, mix_colors(foreground, background, 1));
+            HPEN beat_pen = CreatePen(
+                PS_SOLID, 1, mix_colors(foreground, background, 3));
+            HPEN bar_pen = CreatePen(
+                PS_SOLID,
+                (std::max)(1, scale_for_dpi(2, window_dpi(window_))),
+                mix_colors(callback_->query_std_color(ui_color_highlight),
+                           background,
+                           5));
+            for (const auto& line : lines) {
+                if (!line.is_beat && subdivision_pixels < minimum_pixels) {
+                    continue;
+                }
+                if (line.is_beat && !line.is_bar &&
+                    beat_pixels < minimum_pixels) {
+                    continue;
+                }
+                const auto x = time_x(line.seconds, graph);
+                if (!x.has_value()) {
+                    continue;
+                }
+                HPEN pen = line.is_bar ? bar_pen
+                                      : (line.is_beat ? beat_pen
+                                                      : subdivision_pen);
+                const HGDIOBJ previous =
+                    pen != nullptr ? SelectObject(dc, pen) : nullptr;
+                MoveToEx(dc, *x, graph.top, nullptr);
+                LineTo(dc, *x, graph.bottom);
+                if (previous != nullptr && previous != HGDI_ERROR) {
+                    SelectObject(dc, previous);
+                }
+            }
+            if (subdivision_pen != nullptr) DeleteObject(subdivision_pen);
+            if (beat_pen != nullptr) DeleteObject(beat_pen);
+            if (bar_pen != nullptr) DeleteObject(bar_pen);
+        } catch (...) {
+            // Overlay failures must not invalidate the cached waveform layer.
+        }
+
+        draw_marker(dc,
+                    graph,
+                    loop_engine_.state().in_seconds,
+                    L"IN",
+                    callback_->query_std_color(ui_color_highlight),
+                    background,
+                    font,
+                    false);
+        draw_marker(dc,
+                    graph,
+                    loop_engine_.state().out_seconds,
+                    L"OUT",
+                    foreground,
+                    background,
+                    font,
+                    true);
+    }
+
+    void draw_marker(HDC dc,
+                     const RECT& graph,
+                     double seconds,
+                     const wchar_t* label,
+                     COLORREF color,
+                     COLORREF background,
+                     HFONT font,
+                     bool label_left) noexcept {
+        const auto x = time_x(seconds, graph);
+        if (!x.has_value()) {
+            return;
+        }
+        const UINT dpi = window_dpi(window_);
+        HPEN pen = CreatePen(PS_SOLID,
+                             (std::max)(1, scale_for_dpi(2, dpi)),
+                             color);
+        const HGDIOBJ previous_pen =
+            pen != nullptr ? SelectObject(dc, pen) : nullptr;
+        MoveToEx(dc, *x, graph.top, nullptr);
+        LineTo(dc, *x, graph.bottom);
+        if (previous_pen != nullptr && previous_pen != HGDI_ERROR) {
+            SelectObject(dc, previous_pen);
+        }
+        if (pen != nullptr) DeleteObject(pen);
+
+        const int label_width = scale_for_dpi(label_left ? 34 : 24, dpi);
+        const int label_height = scale_for_dpi(18, dpi);
+        int label_x = label_left ? *x - label_width : *x;
+        label_x = std::clamp(label_x,
+                             static_cast<int>(graph.left),
+                             static_cast<int>(graph.right) - label_width);
+        RECT label_bounds{label_x,
+                          graph.top,
+                          label_x + label_width,
+                          (std::min)(graph.bottom, graph.top + label_height)};
+        HBRUSH brush = CreateSolidBrush(background);
+        if (brush != nullptr) {
+            FillRect(dc, &label_bounds, brush);
+            DeleteObject(brush);
+        }
+        SetTextColor(dc, color);
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, font);
+        DrawTextW(dc, label, -1, &label_bounds,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
     void draw_cursor(HDC dc, const RECT& graph) noexcept {
@@ -629,18 +1595,7 @@ private:
 
     std::optional<int> cursor_x(double playback_position,
                                 const RECT& graph) const noexcept {
-        if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
-            graph.right <= graph.left || graph.bottom <= graph.top) {
-            return std::nullopt;
-        }
-        const double position = playback_position / waveform_->duration_seconds;
-        if (position < view_begin_ || position > view_end_) {
-            return std::nullopt;
-        }
-        const double relative =
-            (position - view_begin_) / (view_end_ - view_begin_);
-        return graph.left + static_cast<int>(
-                                relative * (graph.right - graph.left - 1));
+        return time_x(playback_position, graph);
     }
 
     std::wstring waveform_status_text() const {
@@ -678,7 +1633,7 @@ private:
     int waveform_line_height() const noexcept {
         const UINT dpi = window_dpi(window_);
         const int line_gap = scale_for_dpi(5, dpi);
-        int line_height = scale_for_dpi(18, dpi);
+        int line_height = scale_for_dpi(24, dpi);
         HDC dc = GetDC(window_);
         if (dc != nullptr) {
             HFONT font = callback_->query_font_ex(ui_font_default);
@@ -700,21 +1655,7 @@ private:
     }
 
     RECT waveform_bounds() const noexcept {
-        RECT bounds{};
-        if (window_ == nullptr || !GetClientRect(window_, &bounds)) {
-            return bounds;
-        }
-
-        const UINT dpi = window_dpi(window_);
-        const int margin = scale_for_dpi(12, dpi);
-        const int line_gap = scale_for_dpi(5, dpi);
-        const int line_height = waveform_line_height();
-
-        return RECT{bounds.left + margin,
-                    bounds.top + margin + line_height * 4 + line_gap,
-                    (std::max)(bounds.left + margin, bounds.right - margin),
-                    (std::max)(bounds.top + margin + line_height * 4 + line_gap,
-                               bounds.bottom - margin)};
+        return panel_layout().waveform;
     }
 
     static bool contains(const RECT& bounds, int x, int y) noexcept {
@@ -783,6 +1724,7 @@ private:
             waveform_ = std::move(snapshot);
             waveform_state_ = WaveformState::available;
             analysis_error_.clear();
+            clamp_engine_to_duration(loop_engine_, waveform_->duration_seconds);
         } else {
             waveform_.reset();
             waveform_state_ = WaveformState::unavailable;
@@ -805,13 +1747,22 @@ private:
         redraw_waveform();
     }
 
+    void on_double_click(int x, int y) noexcept {
+        const RECT graph = waveform_graph_bounds(waveform_bounds(),
+                                                 waveform_line_height());
+        if (contains(graph, x, y)) {
+            reset_view();
+        }
+    }
+
     void on_mouse_wheel(WPARAM wparam, LPARAM lparam) noexcept {
         if (waveform_state_ != WaveformState::available || !waveform_) {
             return;
         }
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(window_, &point);
-        const RECT bounds = waveform_bounds();
+        const RECT bounds = waveform_graph_bounds(waveform_bounds(),
+                                                  waveform_line_height());
         if (!contains(bounds, point.x, point.y) || bounds.right <= bounds.left) {
             return;
         }
@@ -838,34 +1789,77 @@ private:
     }
 
     void on_left_button_down(int x, int y) noexcept {
-        const RECT bounds = waveform_bounds();
+        const RECT bounds = waveform_graph_bounds(waveform_bounds(),
+                                                  waveform_line_height());
         if (waveform_state_ != WaveformState::available || !waveform_ ||
             !contains(bounds, x, y)) {
             return;
         }
+        const int hit_radius = scale_for_dpi(8, window_dpi(window_));
+        const auto in_x = time_x(loop_engine_.state().in_seconds, bounds);
+        const auto out_x = time_x(loop_engine_.state().out_seconds, bounds);
+        const int in_distance = in_x.has_value()
+            ? std::abs(x - *in_x)
+            : (std::numeric_limits<int>::max)();
+        const int out_distance = out_x.has_value()
+            ? std::abs(x - *out_x)
+            : (std::numeric_limits<int>::max)();
+        if ((std::min)(in_distance, out_distance) <= hit_radius) {
+            interaction_ = in_distance <= out_distance
+                ? Interaction::marker_in
+                : Interaction::marker_out;
+            drag_marker_in_ = loop_engine_.state().in_seconds;
+            drag_marker_out_ = loop_engine_.state().out_seconds;
+        } else {
+            interaction_ = Interaction::pending_pan;
+        }
         SetCapture(window_);
-        mouse_down_ = true;
-        dragging_ = false;
         mouse_down_x_ = x;
         drag_view_begin_ = view_begin_;
         drag_view_end_ = view_end_;
     }
 
     void on_mouse_move(int x, int) noexcept {
-        if (!mouse_down_ || GetCapture() != window_) {
+        if (interaction_ == Interaction::none || GetCapture() != window_) {
             return;
         }
-        const RECT bounds = waveform_bounds();
+        const RECT bounds = waveform_graph_bounds(waveform_bounds(),
+                                                  waveform_line_height());
         const int width = bounds.right - bounds.left;
         if (width <= 0) {
             return;
         }
-        const int distance = x - mouse_down_x_;
-        if (!dragging_ &&
-            std::abs(distance) >= scale_for_dpi(3, window_dpi(window_))) {
-            dragging_ = true;
+
+        if (interaction_ == Interaction::marker_in ||
+            interaction_ == Interaction::marker_out) {
+            const double relative = std::clamp(
+                static_cast<double>(x - bounds.left) /
+                    static_cast<double>(width),
+                0.0,
+                1.0);
+            const double normalized =
+                view_begin_ + relative * (view_end_ - view_begin_);
+            const double seconds = normalized * waveform_->duration_seconds;
+            const auto result = interaction_ == Interaction::marker_in
+                ? loop_engine_.set_in_clamped(seconds,
+                                              waveform_->duration_seconds)
+                : loop_engine_.set_out_clamped(seconds,
+                                               waveform_->duration_seconds);
+            if (result.valid) {
+                editor_feedback_ = interaction_ == Interaction::marker_in
+                    ? L"Dragging IN (release to save)"
+                    : L"Dragging OUT (release to save)";
+                redraw(false);
+            }
+            return;
         }
-        if (!dragging_) {
+
+        const int distance = x - mouse_down_x_;
+        if (interaction_ == Interaction::pending_pan &&
+            std::abs(distance) >= scale_for_dpi(3, window_dpi(window_))) {
+            interaction_ = Interaction::panning;
+        }
+        if (interaction_ != Interaction::panning) {
             return;
         }
 
@@ -880,22 +1874,50 @@ private:
     }
 
     void on_left_button_up(int x, int y) noexcept {
-        if (!mouse_down_) {
+        if (interaction_ == Interaction::none) {
             return;
         }
-        const bool was_dragging = dragging_;
-        mouse_down_ = false;
-        dragging_ = false;
+        const Interaction completed = interaction_;
+        interaction_ = Interaction::none;
         if (GetCapture() == window_) {
             ReleaseCapture();
         }
-        if (!was_dragging) {
+        if (completed == Interaction::pending_pan) {
             seek_at(x, y);
+        } else if (completed == Interaction::marker_in ||
+                   completed == Interaction::marker_out) {
+            editor_feedback_ = completed == Interaction::marker_in
+                ? L"IN marker saved"
+                : L"OUT marker saved";
+            persist_editor();
+            redraw(false);
+        }
+    }
+
+    void on_capture_lost() noexcept {
+        if (interaction_ == Interaction::marker_in ||
+            interaction_ == Interaction::marker_out) {
+            (void)loop_engine_.set_markers(drag_marker_in_, drag_marker_out_);
+            editor_feedback_ = L"Marker drag cancelled";
+            redraw(false);
+        }
+        interaction_ = Interaction::none;
+    }
+
+    void cancel_interaction(bool release_capture) noexcept {
+        if (interaction_ == Interaction::marker_in ||
+            interaction_ == Interaction::marker_out) {
+            (void)loop_engine_.set_markers(drag_marker_in_, drag_marker_out_);
+        }
+        interaction_ = Interaction::none;
+        if (release_capture && window_ != nullptr && GetCapture() == window_) {
+            ReleaseCapture();
         }
     }
 
     void seek_at(int x, int y) noexcept {
-        const RECT bounds = waveform_bounds();
+        const RECT bounds = waveform_graph_bounds(waveform_bounds(),
+                                                  waveform_line_height());
         if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
             !contains(bounds, x, y) || bounds.right <= bounds.left ||
             !playback_->is_playing() || !playback_->playback_can_seek()) {
@@ -977,7 +1999,7 @@ private:
         if (!playback_->is_playing()) {
             playback_state_ = PlaybackState::stopped;
             track_title_ = "No track";
-            redraw();
+            redraw(false);
             return;
         }
 
@@ -996,12 +2018,15 @@ private:
             track_title_ = "Opening...";
         }
         sync_cursor_timer();
-        redraw();
+        redraw(false);
     }
 
-    void redraw() noexcept {
+    void redraw(bool invalidate_waveform_layer = true) noexcept {
         if (window_ != nullptr) {
-            waveform_layer_dirty_ = true;
+            if (invalidate_waveform_layer) {
+                waveform_layer_dirty_ = true;
+            }
+            editor_layer_dirty_ = true;
             InvalidateRect(window_, nullptr, FALSE);
         }
     }
@@ -1020,11 +2045,13 @@ private:
             paused ? PlaybackState::paused : PlaybackState::playing;
         track_title_ = "Opening...";
         clear_analysis();
+        clear_editor();
         redraw();
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
         refresh_playback_snapshot();
+        load_editor_for_track(track);
         begin_analysis(std::move(track));
     }
 
@@ -1034,6 +2061,7 @@ private:
         track_title_ = "No track";
         playback_position_ = 0.0;
         clear_analysis();
+        clear_editor();
         redraw();
     }
 
@@ -1053,6 +2081,7 @@ private:
 
     void on_playback_edited(metadb_handle_ptr track) override {
         refresh_playback_snapshot();
+        load_editor_for_track(track);
         begin_analysis(std::move(track));
     }
 
@@ -1074,8 +2103,22 @@ private:
     double drag_view_begin_ = 0.0;
     double drag_view_end_ = 1.0;
     int mouse_down_x_ = 0;
-    bool mouse_down_ = false;
-    bool dragging_ = false;
+    Interaction interaction_ = Interaction::none;
+    double drag_marker_in_ = 0.0;
+    double drag_marker_out_ = 4.0;
+    metadb_handle_ptr current_track_;
+    loop_finder::LoopEngine loop_engine_;
+    loop_finder::TapTempo tap_tempo_;
+    std::wstring editor_feedback_ =
+        L"No track - Loop Off; audible looping arrives in M5";
+    HWND bpm_edit_ = nullptr;
+    HWND tap_button_ = nullptr;
+    HWND offset_edit_ = nullptr;
+    HWND snap_combo_ = nullptr;
+    HWND set_in_button_ = nullptr;
+    HWND set_out_button_ = nullptr;
+    HWND loop_checkbox_ = nullptr;
+    bool updating_controls_ = false;
     std::uint64_t analysis_generation_ = 0;
     std::string current_identity_;
     std::string analysis_error_;
@@ -1085,6 +2128,12 @@ private:
     int waveform_layer_width_ = 0;
     int waveform_layer_height_ = 0;
     bool waveform_layer_dirty_ = true;
+    HBITMAP editor_layer_bitmap_ = nullptr;
+    int editor_layer_width_ = 0;
+    int editor_layer_height_ = 0;
+    bool editor_layer_dirty_ = true;
+    HBRUSH background_brush_ = nullptr;
+    COLORREF background_brush_color_ = CLR_INVALID;
     loop_finder::foobar::WaveformAnalysis analysis_;
 };
 
@@ -1164,7 +2213,8 @@ public:
     }
 
     bool get_description(pfc::string_base& output) override {
-        output = "Shows an interactive waveform for the current local track.";
+        output = "Shows a waveform with a manual rhythmic loop editor for the "
+                 "current local track.";
         return true;
     }
 };

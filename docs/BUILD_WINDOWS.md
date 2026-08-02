@@ -103,8 +103,9 @@ references:
 - `foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj`
 - `foobar2000\shared\shared-x64.lib`
 
-It compiles `src\foobar\component.cpp`, `src\foobar\ui_element.cpp`,
-`src\foobar\waveform_analysis.cpp` and the platform-independent core sources.
+It compiles `src\foobar\component.cpp`, `src\foobar\editor_persistence.cpp`,
+`src\foobar\ui_element.cpp`, `src\foobar\waveform_analysis.cpp` and the
+platform-independent core sources, including tap tempo.
 It does not copy or modify SDK sources.
 
 The official SDK's Win32/x64 project configurations name toolset `v142` for
@@ -121,9 +122,9 @@ prompted. Return to **Preferences → Components** and confirm that **Loop Finde
 
 After restart, enable Default UI layout editing, add **Loop Finder** from the
 **Playback Information** group, then disable layout editing. The panel displays
-the current track title, Playing/Paused/Stopped state, **Loop: Off**, waveform
-analysis status, waveform and playback cursor. Looping remains disabled by
-default and the panel does not yet provide loop controls.
+the current track title, Playing/Paused/Stopped state, waveform analysis status,
+waveform and playback cursor, and the M4 editor. **Loop (editor only)** is Off
+after startup and track changes and does not cause audible looping until M5.
 
 The waveform opens as a whole-track overview. Click to seek, use the mouse
 wheel over it to zoom, drag horizontally to navigate, and double-click to reset
@@ -133,6 +134,10 @@ Waveform analysis supports local tracks handled by an installed foobar2000
 decoder and requires a positive known duration. Remote, unsupported,
 zero-length and unknown-length sources display an unavailable/error state.
 Waveforms are cached only in memory for up to eight tracks.
+
+The documented minimum panel size is 560 by 380 logical pixels. Editor metadata
+is stored in foobar2000's component-managed per-track index and never in audio
+tags. Location-orphaned entries expire after 26 weeks.
 
 ## M3 manual verification
 
@@ -161,6 +166,51 @@ The Release build and package check do not replace this runtime test:
     audio responsiveness; confirm no stalls, dropouts, visible idle-playback
     flicker or excessive sustained redraw activity. At maximum zoom, confirm
     the `waveform-v2` detail is materially smoother than the overview data.
+
+## M4 manual verification
+
+The Release build and package inspection do not replace this runtime test:
+
+1. In **File → Preferences → Components**, uninstall the prior Loop Finder if
+   necessary, install `build\foo_loop_finder.fb2k-component`, apply, and restart
+   foobar2000.
+2. Reopen the existing panel. If needed, enable Default UI layout editing, add
+   **Loop Finder** from **Playback Information**, then disable layout editing.
+3. Play a local track. Enter `20`, `300`, and `92.5` in BPM, committing each
+   with Enter or by moving focus; confirm each is accepted and the grid updates.
+4. Try empty text, `nan`, `inf`, `19.9`, `300.1`, and nonnumeric BPM. Confirm the
+   concise inline error appears, engine/grid state remains unchanged, and Escape
+   restores the last valid text.
+5. Click **Tap** at a steady tempo, then repeat with **Ctrl+T** while different
+   panel controls have focus. Confirm no BPM is committed before four taps, the
+   estimate resists one poor tap, inactivity starts a new sequence, and the
+   resulting BPM remains manually editable.
+6. At a known tempo, inspect subdivision, beat and stronger bar/downbeat lines;
+   confirm their musical alignment and theme contrast.
+7. Enter positive and negative **Offset ms** values with millisecond precision;
+   confirm the grid phase moves after commit while markers do not.
+8. Select **Off / free**, **1 beat**, **1/2 beat**, **1/4 beat**, **1/8 beat**,
+   and **1/16 beat**. Set or drag a marker in every mode and confirm free mode is
+   exact and each division snaps as labelled; changing the selector alone must
+   not move existing markers.
+9. Move playback and use **Set IN** and **Set OUT**, then drag both labelled
+   marker lines. Confirm `IN < OUT`, out-of-range drags clamp, rejected crossing
+   drags preserve the last valid marker, and dragging does not seek playback.
+10. Wheel-zoom around several positions, drag empty space to pan, click empty
+    space to seek, and double-click to reset. Confirm waveform, grid, markers and
+    cursor remain time-aligned and the waveform is not reanalyzed.
+11. Change to a second track, make different edits, then return to the first;
+    confirm BPM, phase, snapping and markers return while Loop is Off.
+12. Restart foobar2000 and return to both tracks; confirm editor metadata returns
+    but **Loop (editor only)** is Off.
+13. Arm and disarm **Loop (editor only)** while crossing OUT; confirm its state
+    changes visibly but no OUT-to-IN seek or audible loop occurs in M4.
+14. Resize down to 560×380 logical pixels, change foobar colors/light-dark theme,
+    test another DPI, and use Tab/Shift+Tab, Enter, Escape, Space and Ctrl+T.
+    Confirm controls, focus, labels, hit targets and waveform remain usable.
+15. During analysis, playback, marker dragging, zooming and panning, monitor CPU,
+    playback and UI responsiveness. Confirm no stalls, dropouts, stale waveform,
+    blank-frame flicker or sustained idle redraw regression.
 
 ## Common errors
 

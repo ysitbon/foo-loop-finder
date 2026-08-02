@@ -65,7 +65,7 @@
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
   </ItemDefinitionGroup>
@@ -87,17 +87,19 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;$(FoobarSdkRoot)\foobar2000\shared\shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
   </ItemDefinitionGroup>
 
   <ItemGroup>
     <ClCompile Include="$(ProjectDir)..\src\foobar\component.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\foobar\editor_persistence.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\foobar\ui_element.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\foobar\waveform_analysis.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\beat_grid.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\loop_engine.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\core\tap_tempo.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\waveform.cpp" />
   </ItemGroup>
 

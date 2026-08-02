@@ -13,6 +13,7 @@ test.
 flowchart TD
     FB["foobar2000 playback"] --> Adapter["foobar adapter"]
     Adapter --> Core["loop and beat-grid core"]
+    Store["foobar per-track index"] <--> Adapter
     Decoder["owned background decoder"] --> Waveform["bounded waveform cache"]
     Core --> Panel["Default UI panel"]
     Waveform --> Panel
@@ -37,8 +38,12 @@ src/core/
 Responsibilities:
 
 - `LoopState`: BPM, grid offset, meter, subdivision, IN/OUT and opt-in state.
-- `LoopEngine`: validated state transitions and loop-boundary decisions.
-- `beat_grid`: beat duration, marker snapping and visible grid-line generation.
+- `LoopEngine`: validated BPM, phase, meter, snapping, marker, enable and
+  track-duration-clamping transitions plus loop metrics.
+- `beat_grid`: beat duration, marker snapping and bounded visible grid-line
+  generation with subdivision/beat/bar classification.
+- `TapTempo`: timeout-aware rolling-median tempo calculation from monotonic tap
+  timestamps.
 - `waveform`: reduction of interleaved PCM into display-ready min/max/RMS bins.
 - `StreamingWaveformReducer`: bounded incremental PCM reduction.
 - `resample_waveform`: normalized viewport selection and drawing-width
@@ -68,13 +73,14 @@ Current responsibilities:
 - Cancel obsolete work and publish immutable waveform snapshots on the main
   thread.
 - Keep an eight-entry in-memory LRU cache.
+- Translate M4 controls and marker gestures into `LoopEngine` transitions.
+- Persist versioned per-track editor records through `metadb_index_manager`.
 
 Later responsibilities:
 
-- Translate UI actions into core state transitions.
 - Seek from OUT to IN when looping is enabled.
 - Prevent feedback loops and avoid intercepting user seeks.
-- Persist per-track analysis and marker state, never the active Loop flag.
+- Persist later automatic-analysis outputs separately from manual overrides.
 
 The adapter owns SDK objects and threading rules. SDK types must not leak into
 the portable core.
@@ -102,24 +108,22 @@ The official SDK is an external build dependency and must not be committed.
 
 The panel is a native child window under `src/foobar`. It follows
 the SDK's `ui_element`/`ui_element_instance` pattern, consumes the host's color
-and font callbacks, and scales its layout from the window DPI. It shows the
-current title, playback state, waveform status, waveform and playback cursor
-while keeping Loop visibly and functionally off. Click-to-seek calls the SDK
-only from the main thread and only when playback reports seeking is supported.
+and font callbacks, and scales its layout from the window DPI. Persistent native
+edit, button, combo-box and checkbox children provide BPM, tap tempo, phase,
+snapping, Set IN/OUT and editor-only Loop controls. Enter or focus loss commits
+numeric edits, Escape restores the last valid value, and Ctrl+T records a tap.
+All editor changes request validated core transitions. The Loop toggle does not
+control playback until M5.
 
 The waveform opens in a whole-track overview. Mouse-wheel zoom is centered on
 the pointer, dragging pans a zoomed viewport, and double-click restores the
 overview. Cached bins do not depend on the HWND size or DPI; the portable core
 resamples the selected range for each paint.
 
-Later editor controls:
-
-- beat and bar grid;
-- BPM value and tap tempo;
-- grid phase/offset;
-- draggable IN and OUT markers;
-- snapping division;
-- Loop toggle, visually and functionally off by default.
+Mouse interaction is unambiguous: a marker hit starts a captured marker drag;
+empty-space drag pans; empty-space click seeks; the wheel zooms; double-click
+restores the overview. Capture loss, track change and destruction cancel marker
+drags. Dragging only changes editor state and never repeatedly seeks playback.
 
 Rendering consumes immutable snapshots of core and waveform data. UI events
 request state changes; they do not mutate audio-thread state directly.
@@ -177,13 +181,12 @@ tracks with zero or unknown duration are reported as unavailable; unsupported
 decoder and I/O failures are contained as panel status rather than propagated
 to the host.
 
-Waveform drawing uses a panel-size-dependent off-screen GDI layer derived from
-the immutable snapshot. Zoom, navigation, resize, DPI, theme or analysis-state
-changes invalidate that disposable layer. Ordinary playback ticks do not
-rebuild it: the panel waits until the cursor crosses a display pixel, then
-invalidates only the old and new cursor strips and restores them with `BitBlt`.
-This keeps the cached analysis drawing-independent while avoiding whole-panel
-or whole-waveform redraws during playback.
+Waveform drawing uses a panel-size-dependent off-screen GDI base layer derived
+from the immutable snapshot. A second disposable presentation layer copies that
+base and adds bounded grid lines and IN/OUT markers. BPM, phase, snapping and
+marker changes invalidate only the presentation layer; they do not rebuild the
+waveform base or rerun analysis. Ordinary playback ticks invalidate only old and
+new cursor strips and restore the already composed presentation with `BitBlt`.
 
 Pan and zoom rendering is also completed in the off-screen layer before the
 visible surface changes. The paint path does not clear a waveform-only update;
@@ -207,13 +210,19 @@ waveform panel:
 
 ## Persistence
 
-Persist per-track data such as:
+M4 stores per-track data through the SDK 2025-03-07
+`metadb_index_manager`. The index key hashes the playable location path and
+subsong only, so it is independent of the `waveform-v2` analysis identity and
+survives tag edits. Moving a file changes the key; the old record then follows
+the documented orphan-retention cleanup policy.
 
-- manual or detected BPM;
-- grid offset and meter;
-- snapping subdivision;
-- IN and OUT markers;
-- waveform/analysis cache metadata.
+The little-endian `LFED` record has explicit schema version 1 and stores BPM,
+grid offset, beats per bar, snapping mode, IN and OUT seconds. Missing and
+corrupt data fall back to defaults. Schema 0 records are accepted with snapping
+enabled; unknown future schemas are ignored. Every decoded field is restored
+through `LoopEngine`, and construction/restoration always forces Loop off.
 
-Do not persist Loop as active. A new application/component session always
-starts with Loop disabled.
+The SDK index retains orphaned records for 26 weeks, providing bounded cleanup
+without audio-tag writes. Metadata calls occur only from main-thread UI state
+transitions, never from paint, decoding or audio paths. A new application or
+component session always starts with Loop disabled.

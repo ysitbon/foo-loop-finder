@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(loop_finder_core
     src/core/beat_grid.cpp
     src/core/loop_engine.cpp
+    src/core/tap_tempo.cpp
     src/core/waveform.cpp)
 target_include_directories(loop_finder_core PUBLIC include)
 
