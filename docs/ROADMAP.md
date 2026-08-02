@@ -61,6 +61,13 @@ its archive root. Runtime acceptance remains pending: switch rapidly between
 tracks, seek, zoom, resize, change DPI/theme, stop and restart foobar2000
 without blocking playback, showing stale data or crashing.
 
+Manual pass (2026-08-02): analysis, rapid switching, pause/resume, seeking,
+navigation, resizing, theme/DPI changes, stop and restart behaved correctly.
+Acceptance remains open because playback caused visible repeated redraw/flicker
+and deep zoom looked pixelated. The follow-up build caches an off-screen
+waveform layer, repaints only cursor pixel transitions and uses the higher
+resolution `waveform-v2` format; those two observations require focused retest.
+
 ## M4 — Manual rhythmic loop editor
 
 - [ ] Add editable BPM with validation from 20 to 300.

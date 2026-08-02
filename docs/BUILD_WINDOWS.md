@@ -157,8 +157,9 @@ The Release build and package check do not replace this runtime test:
 9. Restart foobar2000; confirm startup is stable, **Loop: Off** remains, and a
    local track is analyzed again because the cache is intentionally in-memory.
 10. During first-time analysis while playback runs, monitor CPU usage and UI /
-    audio responsiveness; confirm no stalls, dropouts or excessive sustained
-    redraw activity.
+    audio responsiveness; confirm no stalls, dropouts, visible idle-playback
+    flicker or excessive sustained redraw activity. At maximum zoom, confirm
+    the `waveform-v2` detail is materially smoother than the overview data.
 
 ## Common errors
 

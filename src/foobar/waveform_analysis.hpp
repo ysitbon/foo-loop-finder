@@ -20,7 +20,7 @@
 
 namespace loop_finder::foobar {
 
-inline constexpr std::uint32_t kWaveformAnalysisFormatVersion = 1;
+inline constexpr std::uint32_t kWaveformAnalysisFormatVersion = 2;
 
 struct WaveformSnapshot {
     std::vector<WaveformBin> bins;

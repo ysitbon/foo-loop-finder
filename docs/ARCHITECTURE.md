@@ -149,7 +149,7 @@ Track analysis is performed outside the real-time playback path:
 
 1. A main-thread playback callback captures the `metadb_handle`, creates a
    stable identity from path, subsong, file size, timestamp and the explicit
-   waveform format version, then checks the LRU cache.
+   waveform format version (`waveform-v2`), then checks the LRU cache.
 2. A single joinable worker uses the official SDK 2025-03-07
    `input_entry::g_open_for_decoding`, `input_decoder::get_info`,
    `initialize(input_flag_simpledecode)` and `run(audio_chunk)` sequence.
@@ -166,14 +166,24 @@ The worker is owned by the panel analysis controller; it is never detached.
 Destruction disables queued delivery, signals cancellation, and joins the
 worker before releasing state. No `playback_control` or panel/window operation
 is performed by the worker. A 50 ms main-thread timer is active only while a
-waveform is available and playback is running; it invalidates the waveform
-region for a smooth cursor and is stopped on pause, stop and destruction.
+waveform is available and playback is running; cursor work is skipped until it
+crosses a display pixel, and the timer is stopped on pause, stop and
+destruction.
 
-The LRU holds at most eight resolution-independent snapshots (16,384 bins per
-track). It is deliberately in-memory only. Remote/unrecognized inputs and
+The LRU holds at most eight resolution-independent snapshots (up to 262,144
+bins per track, about 24 MiB total for bin payloads at full resolution). It is
+deliberately in-memory only. Remote/unrecognized inputs and
 tracks with zero or unknown duration are reported as unavailable; unsupported
 decoder and I/O failures are contained as panel status rather than propagated
 to the host.
+
+Waveform drawing uses a panel-size-dependent off-screen GDI layer derived from
+the immutable snapshot. Zoom, navigation, resize, DPI, theme or analysis-state
+changes invalidate that disposable layer. Ordinary playback ticks do not
+rebuild it: the panel waits until the cursor crosses a display pixel, then
+invalidates only the old and new cursor strips and restores them with `BitBlt`.
+This keeps the cached analysis drawing-independent while avoiding whole-panel
+or whole-waveform redraws during playback.
 
 Automatic BPM and beat detection are separate analysis outputs. Manual BPM,
 tap tempo and grid phase remain available because automatic estimates can be

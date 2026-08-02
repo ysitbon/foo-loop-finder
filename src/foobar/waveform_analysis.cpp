@@ -11,7 +11,7 @@ namespace loop_finder::foobar {
 
 namespace {
 
-constexpr std::size_t kAnalysisBins = 16'384;
+constexpr std::size_t kAnalysisBins = 262'144;
 
 } // namespace
 

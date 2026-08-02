@@ -29,6 +29,12 @@ Waveform interactions:
 - Drag horizontally to navigate a zoomed view.
 - Double-click to restore the whole-track overview.
 
+The static waveform is rendered to an off-screen layer. During ordinary
+playback, redraws occur only when the cursor crosses a display pixel and affect
+only its old and new strips; zooming, navigation and resizing rebuild the
+layer. Analysis format `waveform-v2` retains up to 262,144 bins so zoomed views
+do not have to enlarge low-resolution overview data.
+
 Analysis is intentionally limited to decoder-supported local tracks with a
 positive known duration. Remote, unsupported, zero-length and unknown-length
 sources show **Analysis unavailable** and do not affect playback. The cache is

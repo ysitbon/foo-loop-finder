@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -95,6 +96,7 @@ public:
         if (window_ != nullptr) {
             KillTimer(window_, kCursorTimer);
         }
+        discard_waveform_layer();
     }
 
     void initialize_window(HWND parent) {
@@ -230,6 +232,10 @@ private:
             panel->paint();
             return 0;
 
+        case WM_SIZE:
+            panel->discard_waveform_layer();
+            return 0;
+
         case WM_TIMER:
             if (wparam == kCursorTimer) {
                 panel->update_playback_cursor();
@@ -266,6 +272,7 @@ private:
 
         case WM_DPICHANGED:
         case 0x02E3: // WM_DPICHANGED_AFTERPARENT
+            panel->discard_waveform_layer();
             panel->callback_->on_min_max_info_change();
             panel->redraw();
             return 0;
@@ -367,7 +374,12 @@ private:
                       (std::max)(line.left, bounds.right - margin),
                       (std::max)(line.bottom + line_gap,
                                  bounds.bottom - margin)};
-        draw_waveform(dc, waveform, foreground, background, font, line_height);
+        paint_waveform(dc,
+                       waveform,
+                       foreground,
+                       background,
+                       font,
+                       line_height);
 
         if (heading_font != nullptr) {
             DeleteObject(heading_font);
@@ -378,15 +390,118 @@ private:
         EndPaint(window_, &paint_state);
     }
 
-    void draw_waveform(HDC dc,
-                       const RECT& bounds,
-                       COLORREF foreground,
-                       COLORREF background,
-                       HFONT font,
-                       int line_height) noexcept {
+    void paint_waveform(HDC dc,
+                        const RECT& bounds,
+                        COLORREF foreground,
+                        COLORREF background,
+                        HFONT font,
+                        int line_height) noexcept {
         if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
             return;
         }
+
+        if (ensure_waveform_layer(
+                dc, bounds, foreground, background, font, line_height)) {
+            HDC memory_dc = CreateCompatibleDC(dc);
+            if (memory_dc != nullptr) {
+                const HGDIOBJ previous =
+                    SelectObject(memory_dc, waveform_layer_bitmap_);
+                if (previous != nullptr && previous != HGDI_ERROR) {
+                    BitBlt(dc,
+                           bounds.left,
+                           bounds.top,
+                           bounds.right - bounds.left,
+                           bounds.bottom - bounds.top,
+                           memory_dc,
+                           0,
+                           0,
+                           SRCCOPY);
+                    SelectObject(memory_dc, previous);
+                }
+                DeleteDC(memory_dc);
+            }
+        } else {
+            draw_waveform_layer(
+                dc, bounds, foreground, background, font, line_height);
+        }
+
+        draw_cursor(dc, waveform_graph_bounds(bounds, line_height));
+    }
+
+    bool ensure_waveform_layer(HDC target,
+                               const RECT& bounds,
+                               COLORREF foreground,
+                               COLORREF background,
+                               HFONT font,
+                               int line_height) noexcept {
+        const int width = bounds.right - bounds.left;
+        const int height = bounds.bottom - bounds.top;
+        if (!waveform_layer_dirty_ && waveform_layer_bitmap_ != nullptr &&
+            waveform_layer_width_ == width && waveform_layer_height_ == height) {
+            return true;
+        }
+
+        discard_waveform_layer();
+        HDC memory_dc = CreateCompatibleDC(target);
+        if (memory_dc == nullptr) {
+            return false;
+        }
+        HBITMAP bitmap = CreateCompatibleBitmap(target, width, height);
+        if (bitmap == nullptr) {
+            DeleteDC(memory_dc);
+            return false;
+        }
+
+        const HGDIOBJ previous = SelectObject(memory_dc, bitmap);
+        if (previous == nullptr || previous == HGDI_ERROR) {
+            DeleteObject(bitmap);
+            DeleteDC(memory_dc);
+            return false;
+        }
+
+        const RECT local_bounds{0, 0, width, height};
+        draw_waveform_layer(memory_dc,
+                            local_bounds,
+                            foreground,
+                            background,
+                            font,
+                            line_height);
+        SelectObject(memory_dc, previous);
+        DeleteDC(memory_dc);
+
+        waveform_layer_bitmap_ = bitmap;
+        waveform_layer_width_ = width;
+        waveform_layer_height_ = height;
+        waveform_layer_dirty_ = false;
+        return true;
+    }
+
+    void discard_waveform_layer() noexcept {
+        if (waveform_layer_bitmap_ != nullptr) {
+            DeleteObject(waveform_layer_bitmap_);
+            waveform_layer_bitmap_ = nullptr;
+        }
+        waveform_layer_width_ = 0;
+        waveform_layer_height_ = 0;
+        waveform_layer_dirty_ = true;
+    }
+
+    void draw_waveform_layer(HDC dc,
+                             const RECT& bounds,
+                             COLORREF foreground,
+                             COLORREF background,
+                             HFONT font,
+                             int line_height) noexcept {
+        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+            return;
+        }
+
+        HBRUSH background_brush = CreateSolidBrush(background);
+        if (background_brush != nullptr) {
+            FillRect(dc, &bounds, background_brush);
+            DeleteObject(background_brush);
+        }
+        SetBkMode(dc, TRANSPARENT);
 
         const COLORREF muted = blend_colors(foreground, background);
         HPEN border_pen = CreatePen(PS_SOLID, 1, muted);
@@ -422,11 +537,7 @@ private:
             return;
         }
 
-        const int interaction_height = line_height;
-        RECT graph{bounds.left + 2,
-                   status_bounds.bottom,
-                   bounds.right - 2,
-                   bounds.bottom - interaction_height};
+        const RECT graph = waveform_graph_bounds(bounds, line_height);
         if (graph.right <= graph.left || graph.bottom <= graph.top) {
             return;
         }
@@ -464,7 +575,6 @@ private:
                 DeleteObject(waveform_pen);
             }
 
-            draw_cursor(dc, graph);
         } catch (...) {
             // Painting must never destabilize the host. Analysis data remains
             // intact and the next invalidation can retry at a new panel size.
@@ -483,32 +593,48 @@ private:
                       DT_END_ELLIPSIS);
     }
 
+    static RECT waveform_graph_bounds(const RECT& bounds,
+                                      int line_height) noexcept {
+        return RECT{bounds.left + 2,
+                    (std::min)(bounds.bottom, bounds.top + line_height),
+                    bounds.right - 2,
+                    bounds.bottom - line_height};
+    }
+
     void draw_cursor(HDC dc, const RECT& graph) noexcept {
-        if (!waveform_ || waveform_->duration_seconds <= 0.0) {
+        const auto x = cursor_x(playback_position_, graph);
+        if (!x.has_value()) {
             return;
         }
-        const double position =
-            playback_position_ / waveform_->duration_seconds;
-        if (position < view_begin_ || position > view_end_) {
-            return;
-        }
-        const double relative =
-            (position - view_begin_) / (view_end_ - view_begin_);
-        const int x = graph.left + static_cast<int>(
-                                       relative * (graph.right - graph.left - 1));
         const COLORREF highlight =
             callback_->query_std_color(ui_color_highlight);
         HPEN cursor_pen = CreatePen(PS_SOLID, 1, highlight);
         const HGDIOBJ previous =
             cursor_pen != nullptr ? SelectObject(dc, cursor_pen) : nullptr;
-        MoveToEx(dc, x, graph.top, nullptr);
-        LineTo(dc, x, graph.bottom);
+        MoveToEx(dc, *x, graph.top, nullptr);
+        LineTo(dc, *x, graph.bottom);
         if (previous != nullptr && previous != HGDI_ERROR) {
             SelectObject(dc, previous);
         }
         if (cursor_pen != nullptr) {
             DeleteObject(cursor_pen);
         }
+    }
+
+    std::optional<int> cursor_x(double playback_position,
+                                const RECT& graph) const noexcept {
+        if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
+            graph.right <= graph.left || graph.bottom <= graph.top) {
+            return std::nullopt;
+        }
+        const double position = playback_position / waveform_->duration_seconds;
+        if (position < view_begin_ || position > view_end_) {
+            return std::nullopt;
+        }
+        const double relative =
+            (position - view_begin_) / (view_end_ - view_begin_);
+        return graph.left + static_cast<int>(
+                                relative * (graph.right - graph.left - 1));
     }
 
     std::wstring waveform_status_text() const {
@@ -543,14 +669,8 @@ private:
         return L"Stopped";
     }
 
-    RECT waveform_bounds() const noexcept {
-        RECT bounds{};
-        if (window_ == nullptr || !GetClientRect(window_, &bounds)) {
-            return bounds;
-        }
-
+    int waveform_line_height() const noexcept {
         const UINT dpi = window_dpi(window_);
-        const int margin = scale_for_dpi(12, dpi);
         const int line_gap = scale_for_dpi(5, dpi);
         int line_height = scale_for_dpi(18, dpi);
         HDC dc = GetDC(window_);
@@ -570,6 +690,19 @@ private:
             }
             ReleaseDC(window_, dc);
         }
+        return line_height;
+    }
+
+    RECT waveform_bounds() const noexcept {
+        RECT bounds{};
+        if (window_ == nullptr || !GetClientRect(window_, &bounds)) {
+            return bounds;
+        }
+
+        const UINT dpi = window_dpi(window_);
+        const int margin = scale_for_dpi(12, dpi);
+        const int line_gap = scale_for_dpi(5, dpi);
+        const int line_height = waveform_line_height();
 
         return RECT{bounds.left + margin,
                     bounds.top + margin + line_height * 4 + line_gap,
@@ -779,8 +912,42 @@ private:
             sync_cursor_timer();
             return;
         }
-        playback_position_ = playback_->playback_get_position();
-        redraw_waveform();
+        set_playback_position(playback_->playback_get_position());
+    }
+
+    void set_playback_position(double position) noexcept {
+        const double previous_position = playback_position_;
+        playback_position_ = position;
+        if (window_ == nullptr || waveform_state_ != WaveformState::available) {
+            return;
+        }
+
+        const RECT bounds = waveform_bounds();
+        const RECT graph =
+            waveform_graph_bounds(bounds, waveform_line_height());
+        const auto previous_x = cursor_x(previous_position, graph);
+        const auto current_x = cursor_x(playback_position_, graph);
+        if (previous_x == current_x) {
+            return;
+        }
+
+        const int cursor_padding =
+            (std::max)(1, scale_for_dpi(2, window_dpi(window_)));
+        const auto invalidate_cursor = [&](int x) noexcept {
+            RECT cursor_bounds{(std::max)(static_cast<int>(graph.left),
+                                          x - cursor_padding),
+                               graph.top,
+                               (std::min)(static_cast<int>(graph.right),
+                                          x + cursor_padding + 1),
+                               graph.bottom};
+            InvalidateRect(window_, &cursor_bounds, FALSE);
+        };
+        if (previous_x.has_value()) {
+            invalidate_cursor(*previous_x);
+        }
+        if (current_x.has_value()) {
+            invalidate_cursor(*current_x);
+        }
     }
 
     void sync_cursor_timer() noexcept {
@@ -828,12 +995,14 @@ private:
 
     void redraw() noexcept {
         if (window_ != nullptr) {
+            waveform_layer_dirty_ = true;
             InvalidateRect(window_, nullptr, FALSE);
         }
     }
 
     void redraw_waveform() noexcept {
         if (window_ != nullptr) {
+            waveform_layer_dirty_ = true;
             const RECT bounds = waveform_bounds();
             InvalidateRect(window_, &bounds, FALSE);
         }
@@ -868,14 +1037,12 @@ private:
 
     void on_playback_seek(double time) override {
         core_api::ensure_main_thread();
-        playback_position_ = time;
-        redraw_waveform();
+        set_playback_position(time);
     }
 
     void on_playback_time(double time) override {
         core_api::ensure_main_thread();
-        playback_position_ = time;
-        redraw_waveform();
+        set_playback_position(time);
     }
 
     void on_playback_edited(metadb_handle_ptr track) override {
@@ -908,6 +1075,10 @@ private:
     std::string analysis_error_;
     loop_finder::foobar::WaveformSnapshotPtr waveform_;
     loop_finder::foobar::WaveformCache waveform_cache_{8};
+    HBITMAP waveform_layer_bitmap_ = nullptr;
+    int waveform_layer_width_ = 0;
+    int waveform_layer_height_ = 0;
+    bool waveform_layer_dirty_ = true;
     loop_finder::foobar::WaveformAnalysis analysis_;
 };
 
