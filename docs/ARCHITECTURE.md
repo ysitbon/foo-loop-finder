@@ -185,6 +185,11 @@ invalidates only the old and new cursor strips and restores them with `BitBlt`.
 This keeps the cached analysis drawing-independent while avoiding whole-panel
 or whole-waveform redraws during playback.
 
+Pan and zoom rendering is also completed in the off-screen layer before the
+visible surface changes. The paint path does not clear a waveform-only update;
+it keeps the prior frame visible and replaces it with one `BitBlt` after the
+new viewport has been rendered.
+
 Automatic BPM and beat detection are separate analysis outputs. Manual BPM,
 tap tempo and grid phase remain available because automatic estimates can be
 half-time, double-time or phase-shifted.

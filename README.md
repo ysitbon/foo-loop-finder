@@ -35,6 +35,9 @@ only its old and new strips; zooming, navigation and resizing rebuild the
 layer. Analysis format `waveform-v2` retains up to 262,144 bins so zoomed views
 do not have to enlarge low-resolution overview data.
 
+When a pan rebuild is needed, the last completed layer remains visible until
+the replacement is ready and is then copied to the panel in one operation.
+
 Analysis is intentionally limited to decoder-supported local tracks with a
 positive known duration. Remote, unsupported, zero-length and unknown-length
 sources show **Analysis unavailable** and do not affect playback. The cache is
@@ -101,8 +104,7 @@ ctest --test-dir build\core --output-on-failure
 
 ## Roadmap
 
-1. Complete manual foobar2000 acceptance of the waveform view
-2. Add BPM, offset, IN/OUT and opt-in Loop controls
-3. Connect playback callbacks and seek from OUT to IN
-4. Add automatic BPM/beat detection
-5. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP
+1. Add BPM, offset, IN/OUT and opt-in Loop controls
+2. Connect playback callbacks and seek from OUT to IN
+3. Add automatic BPM/beat detection
+4. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP

@@ -53,20 +53,16 @@ regression was observed.
 - [x] Add click-to-seek, zoom and horizontal navigation.
 - [x] Cancel stale analysis when the current track changes.
 - [x] Cache waveform data by stable track identity and analysis version.
-- [ ] Complete runtime acceptance in foobar2000.
+- [x] Complete runtime acceptance in foobar2000.
 
-Implementation evidence: portable waveform tests pass and the M3 component
-builds as Release x64 against SDK 2025-03-07; the package contains the DLL at
-its archive root. Runtime acceptance remains pending: switch rapidly between
-tracks, seek, zoom, resize, change DPI/theme, stop and restart foobar2000
-without blocking playback, showing stale data or crashing.
-
-Manual pass (2026-08-02): analysis, rapid switching, pause/resume, seeking,
-navigation, resizing, theme/DPI changes, stop and restart behaved correctly.
-Acceptance remains open because playback caused visible repeated redraw/flicker
-and deep zoom looked pixelated. The follow-up build caches an off-screen
-waveform layer, repaints only cursor pixel transitions and uses the higher
-resolution `waveform-v2` format; those two observations require focused retest.
+Acceptance evidence: portable waveform tests pass, the component builds as
+Release x64 against SDK 2025-03-07, and the package contains the DLL at its
+archive root. Manual foobar2000 testing on 2026-08-02 covered first analysis,
+rapid track changes, pause/resume, seeking, zoom/navigation, resizing,
+theme/DPI changes, stop, restart and concurrent CPU responsiveness. Follow-up
+builds eliminated idle-playback and panning flicker and improved deep-zoom
+definition with the versioned `waveform-v2` format; focused retesting confirmed
+the fixes without crashes, stale results or playback/UI regressions.
 
 ## M4 — Manual rhythmic loop editor
 
@@ -131,5 +127,5 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Complete the documented M3 manual foobar2000 verification. Do not begin M4
-until M3 runtime acceptance is confirmed.
+Begin M4 with validated editable BPM input from 20 to 300 while preserving the
+existing waveform behavior and keeping Loop disabled by default.

@@ -147,7 +147,8 @@ The Release build and package check do not replace this runtime test:
 4. Click several waveform positions; confirm playback seeks to the matching
    time. Also try an unseekable source and confirm the click is safely ignored.
 5. Turn the wheel over the waveform to zoom, drag horizontally to navigate,
-   then double-click and confirm the whole-track overview returns.
+   then double-click and confirm the whole-track overview returns. Confirm
+   panning does not flash a blank/background frame while rebuilding the view.
 6. Resize the panel at whole-track and zoomed views; confirm the waveform
    resamples cleanly and interactions still map to the visible time range.
 7. Change foobar2000 theme/colors and move between tested DPI settings; confirm

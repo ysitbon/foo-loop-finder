@@ -304,13 +304,6 @@ private:
         const COLORREF background =
             callback_->query_std_color(ui_color_background);
         const COLORREF foreground = callback_->query_std_color(ui_color_text);
-
-        HBRUSH background_brush = CreateSolidBrush(background);
-        if (background_brush != nullptr) {
-            FillRect(dc, &bounds, background_brush);
-            DeleteObject(background_brush);
-        }
-
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, foreground);
 
@@ -319,14 +312,6 @@ private:
             font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         }
         const HGDIOBJ previous_font = SelectObject(dc, font);
-
-        LOGFONTW font_description{};
-        HFONT heading_font = nullptr;
-        if (GetObjectW(font, sizeof(font_description), &font_description) != 0) {
-            font_description.lfWeight =
-                std::max<LONG>(font_description.lfWeight, FW_SEMIBOLD);
-            heading_font = CreateFontIndirectW(&font_description);
-        }
 
         TEXTMETRICW metrics{};
         GetTextMetricsW(dc, &metrics);
@@ -343,37 +328,58 @@ private:
                   bounds.top + margin,
                   (std::max)(bounds.left + margin, bounds.right - margin),
                   bounds.bottom};
-
-        if (heading_font != nullptr) {
-            SelectObject(dc, heading_font);
-        }
-        line.bottom = line.top + line_height;
-        DrawTextW(dc, L"Loop Finder", -1, &line, text_flags);
-
-        SelectObject(dc, font);
-        line.top += line_height;
-        line.bottom = line.top + line_height;
-        const pfc::stringcvt::string_wide_from_utf8 wide_title(track_title_);
-        const std::wstring track_line =
-            std::wstring(L"Track: ") + wide_title.get_ptr();
-        DrawTextW(dc, track_line.c_str(), -1, &line, text_flags);
-
-        line.top += line_height;
-        line.bottom = line.top + line_height;
-        const std::wstring playback_line =
-            std::wstring(L"Playback: ") + playback_state_text();
-        DrawTextW(dc, playback_line.c_str(), -1, &line, text_flags);
-
-        line.top += line_height;
-        line.bottom = line.top + line_height;
-        SetTextColor(dc, blend_colors(foreground, background));
-        DrawTextW(dc, L"Loop: Off", -1, &line, text_flags);
-
         RECT waveform{line.left,
-                      line.bottom + line_gap,
+                      line.top + line_height * 4 + line_gap,
                       (std::max)(line.left, bounds.right - margin),
-                      (std::max)(line.bottom + line_gap,
+                      (std::max)(line.top + line_height * 4 + line_gap,
                                  bounds.bottom - margin)};
+        const bool waveform_only_paint =
+            paint_state.rcPaint.left >= waveform.left &&
+            paint_state.rcPaint.top >= waveform.top &&
+            paint_state.rcPaint.right <= waveform.right &&
+            paint_state.rcPaint.bottom <= waveform.bottom;
+
+        HFONT heading_font = nullptr;
+        if (!waveform_only_paint) {
+            HBRUSH background_brush = CreateSolidBrush(background);
+            if (background_brush != nullptr) {
+                FillRect(dc, &bounds, background_brush);
+                DeleteObject(background_brush);
+            }
+
+            LOGFONTW font_description{};
+            if (GetObjectW(font, sizeof(font_description), &font_description) !=
+                0) {
+                font_description.lfWeight =
+                    std::max<LONG>(font_description.lfWeight, FW_SEMIBOLD);
+                heading_font = CreateFontIndirectW(&font_description);
+            }
+            if (heading_font != nullptr) {
+                SelectObject(dc, heading_font);
+            }
+            line.bottom = line.top + line_height;
+            DrawTextW(dc, L"Loop Finder", -1, &line, text_flags);
+
+            SelectObject(dc, font);
+            line.top += line_height;
+            line.bottom = line.top + line_height;
+            const pfc::stringcvt::string_wide_from_utf8 wide_title(track_title_);
+            const std::wstring track_line =
+                std::wstring(L"Track: ") + wide_title.get_ptr();
+            DrawTextW(dc, track_line.c_str(), -1, &line, text_flags);
+
+            line.top += line_height;
+            line.bottom = line.top + line_height;
+            const std::wstring playback_line =
+                std::wstring(L"Playback: ") + playback_state_text();
+            DrawTextW(dc, playback_line.c_str(), -1, &line, text_flags);
+
+            line.top += line_height;
+            line.bottom = line.top + line_height;
+            SetTextColor(dc, blend_colors(foreground, background));
+            DrawTextW(dc, L"Loop: Off", -1, &line, text_flags);
+        }
+
         paint_waveform(dc,
                        waveform,
                        foreground,
