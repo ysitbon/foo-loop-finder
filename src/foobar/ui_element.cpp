@@ -677,6 +677,25 @@ private:
         return value;
     }
 
+    static void replace_edit_text_preserving_selection(
+        HWND edit,
+        const std::wstring& text) noexcept {
+        DWORD selection_start = 0;
+        DWORD selection_end = 0;
+        SendMessageW(edit,
+                     EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&selection_start),
+                     reinterpret_cast<LPARAM>(&selection_end));
+        SetWindowTextW(edit, text.c_str());
+        const DWORD text_length = static_cast<DWORD>(text.size());
+        selection_start = (std::min)(selection_start, text_length);
+        selection_end = (std::min)(selection_end, text_length);
+        SendMessageW(edit,
+                     EM_SETSEL,
+                     selection_start,
+                     selection_end);
+    }
+
     static int snap_combo_index(loop_finder::SnapMode mode) noexcept {
         switch (mode) {
         case loop_finder::SnapMode::off: return 0;
@@ -763,8 +782,8 @@ private:
             redraw(false, false);
             return;
         }
-        SetWindowTextW(bpm_edit_,
-                       format_number(loop_engine_.state().bpm).c_str());
+        replace_edit_text_preserving_selection(
+            bpm_edit_, format_number(loop_engine_.state().bpm));
         editor_feedback_ = L"BPM updated; markers were not moved";
         persist_editor();
         redraw(false, true);
@@ -786,10 +805,11 @@ private:
             redraw(false, false);
             return;
         }
-        SetWindowTextW(offset_edit_,
-                       format_number(
-                           loop_engine_.state().grid_offset_seconds * 1000.0,
-                           10).c_str());
+        replace_edit_text_preserving_selection(
+            offset_edit_,
+            format_number(
+                loop_engine_.state().grid_offset_seconds * 1000.0,
+                10));
         editor_feedback_ = L"Grid phase updated; markers were not moved";
         persist_editor();
         redraw(false, true);
@@ -1579,9 +1599,12 @@ private:
         const int label_width = scale_for_dpi(label_left ? 34 : 24, dpi);
         const int label_height = scale_for_dpi(18, dpi);
         int label_x = label_left ? *x - label_width : *x;
+        const int maximum_label_x = (std::max)(
+            static_cast<int>(graph.left),
+            static_cast<int>(graph.right) - label_width);
         label_x = std::clamp(label_x,
                              static_cast<int>(graph.left),
-                             static_cast<int>(graph.right) - label_width);
+                             maximum_label_x);
         RECT label_bounds{label_x,
                           graph.top,
                           label_x + label_width,
@@ -1861,6 +1884,10 @@ private:
 
         if (interaction_ == Interaction::marker_in ||
             interaction_ == Interaction::marker_out) {
+            const bool dragging_out = interaction_ == Interaction::marker_out;
+            const double previous_seconds = dragging_out
+                ? loop_engine_.state().out_seconds
+                : loop_engine_.state().in_seconds;
             const double relative = std::clamp(
                 static_cast<double>(x - bounds.left) /
                     static_cast<double>(width),
@@ -1869,13 +1896,20 @@ private:
             const double normalized =
                 view_begin_ + relative * (view_end_ - view_begin_);
             const double seconds = normalized * waveform_->duration_seconds;
-            const auto result = interaction_ == Interaction::marker_in
+            const auto result = !dragging_out
                 ? loop_engine_.set_in_clamped(seconds,
                                               waveform_->duration_seconds)
                 : loop_engine_.set_out_clamped(seconds,
                                                waveform_->duration_seconds);
             if (result.valid) {
-                redraw_marker_drag();
+                const double current_seconds = dragging_out
+                    ? loop_engine_.state().out_seconds
+                    : loop_engine_.state().in_seconds;
+                if (current_seconds != previous_seconds) {
+                    redraw_marker_drag(previous_seconds,
+                                       current_seconds,
+                                       dragging_out);
+                }
             }
             return;
         }
@@ -2060,14 +2094,44 @@ private:
         }
     }
 
-    void redraw_marker_drag() noexcept {
+    void redraw_marker_drag(double previous_seconds,
+                            double current_seconds,
+                            bool label_left) noexcept {
         if (window_ == nullptr) {
             return;
         }
         const auto layout = panel_layout();
-        InvalidateRect(window_, &layout.marker_info, FALSE);
-        InvalidateRect(window_, &layout.duration_info, FALSE);
-        InvalidateRect(window_, &layout.waveform, FALSE);
+        const RECT graph = waveform_graph_bounds(layout.waveform,
+                                                  layout.line_height);
+        const auto invalidate_marker = [&](double seconds) noexcept {
+            const auto x = time_x(seconds, graph);
+            if (!x.has_value()) {
+                return;
+            }
+            const UINT dpi = window_dpi(window_);
+            const int padding = (std::max)(2, scale_for_dpi(3, dpi));
+            const int label_width = scale_for_dpi(label_left ? 34 : 24, dpi);
+            int label_x = label_left ? *x - label_width : *x;
+            const int maximum_label_x = (std::max)(
+                static_cast<int>(graph.left),
+                static_cast<int>(graph.right) - label_width);
+            label_x = std::clamp(label_x,
+                                 static_cast<int>(graph.left),
+                                 maximum_label_x);
+            RECT marker_bounds{
+                (std::max)(static_cast<int>(graph.left),
+                           (std::min)(*x - padding, label_x)),
+                graph.top,
+                (std::min)(static_cast<int>(graph.right),
+                           (std::max)(*x + padding + 1,
+                                      label_x + label_width)),
+                graph.bottom};
+            if (marker_bounds.right > marker_bounds.left) {
+                InvalidateRect(window_, &marker_bounds, FALSE);
+            }
+        };
+        invalidate_marker(previous_seconds);
+        invalidate_marker(current_seconds);
     }
 
     void redraw_waveform() noexcept {

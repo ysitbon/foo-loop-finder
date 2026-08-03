@@ -214,10 +214,12 @@ The Release build and package inspection do not replace this runtime test:
 
 After the initial M4 acceptance pass, focused follow-up testing should also
 confirm that Escape immediately restores the last valid BPM/grid-offset text
-while an edit has focus, and that continuous IN/OUT marker dragging does not
-flash the cached waveform or grid. A small 50 ms playback-cursor timer pattern
-may remain visible in CPU graphs while playing, but it should return to the idle
-baseline when playback stops and must not impair playback or UI response.
+while an edit has focus, Enter preserves the caret position after normalizing a
+valid value, and continuous IN/OUT marker dragging does not flash the cached
+waveform or grid. Marker and duration text refreshes on release. A small 50 ms
+playback-cursor timer pattern may remain visible in CPU graphs while playing,
+but it should return to the idle baseline when playback stops and must not
+impair playback or UI response.
 
 ## Common errors
 
