@@ -6,6 +6,7 @@
 
 #include "loop_finder/beat_grid.hpp"
 #include "loop_finder/loop_engine.hpp"
+#include "loop_finder/loop_transport.hpp"
 #include "loop_finder/tap_tempo.hpp"
 
 #include <algorithm>
@@ -134,6 +135,10 @@ public:
 
     ~LoopFinderPanel() {
         core_api::ensure_main_thread();
+        transport_.reset(loop_finder::LoopTransportResetReason::shutdown);
+        if (active_loop_panel_ == this) {
+            active_loop_panel_ = nullptr;
+        }
         cancel_interaction(true);
         analysis_.cancel();
         if (window_ != nullptr) {
@@ -514,7 +519,7 @@ private:
                                          kSetOutButton);
         loop_checkbox_ = create_control(0,
                                         L"BUTTON",
-                                        L"&Loop (editor only)",
+                                        L"&Loop (seek-based)",
                                         BS_AUTOCHECKBOX,
                                         kLoopCheckbox);
         SendMessageW(bpm_edit_, EM_SETCUEBANNER, FALSE,
@@ -935,23 +940,128 @@ private:
         }
         editor_feedback_ = is_in ? L"IN set from playback position"
                                  : L"OUT set from playback position";
+        reconfigure_transport_for_markers();
         persist_editor();
         redraw(false, false);
+    }
+
+    static double monotonic_seconds() noexcept {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    loop_finder::LoopRegion loop_region() const noexcept {
+        return {loop_engine_.state().in_seconds,
+                loop_engine_.state().out_seconds};
+    }
+
+    bool source_can_seek() const noexcept {
+        try {
+            return playback_->is_playing() && playback_->playback_can_seek();
+        } catch (...) {
+            return false;
+        }
+    }
+
+    std::optional<double> transport_position() const noexcept {
+        try {
+            if (!playback_->is_playing()) {
+                return std::nullopt;
+            }
+            const double position = playback_->playback_get_position();
+            return std::isfinite(position)
+                ? std::optional<double>(position)
+                : std::nullopt;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    void force_loop_off(loop_finder::LoopTransportResetReason reason,
+                        const wchar_t* feedback,
+                        bool repaint = true) noexcept {
+        (void)loop_engine_.set_enabled(false);
+        transport_.reset(reason);
+        if (active_loop_panel_ == this) {
+            active_loop_panel_ = nullptr;
+        }
+        if (feedback != nullptr) {
+            editor_feedback_ = feedback;
+        }
+        sync_controls();
+        sync_cursor_timer();
+        if (repaint) {
+            redraw(false, false);
+        }
+    }
+
+    void yield_loop_ownership() noexcept {
+        force_loop_off(loop_finder::LoopTransportResetReason::loop_disabled,
+                       L"Loop: Off - another Loop Finder panel took control");
+    }
+
+    void reconfigure_transport_for_markers() noexcept {
+        if (!loop_engine_.state().enabled) {
+            return;
+        }
+        if (!source_can_seek()) {
+            force_loop_off(loop_finder::LoopTransportResetReason::unseekable,
+                           L"Loop: Off - source is not seekable");
+            return;
+        }
+        if (!transport_.update_markers(loop_region(), transport_position())) {
+            force_loop_off(
+                loop_finder::LoopTransportResetReason::invalid_markers,
+                L"Loop: Off - markers are invalid");
+            return;
+        }
+        try {
+            transport_.set_paused(playback_->is_paused());
+        } catch (...) {
+            transport_.set_paused(true);
+        }
     }
 
     void change_loop_enabled() noexcept {
         const bool requested =
             SendMessageW(loop_checkbox_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const auto result = loop_engine_.set_enabled(requested);
-        if (!result.valid) {
-            editor_feedback_ = L"Loop could not be armed with invalid markers";
-            sync_controls();
-            redraw(false, false);
+        if (!requested) {
+            force_loop_off(loop_finder::LoopTransportResetReason::loop_disabled,
+                           L"Loop: Off");
             return;
         }
-        editor_feedback_ = requested
-            ? L"Loop armed in editor only - audible looping arrives in M5"
-            : L"Loop disarmed";
+
+        if (!source_can_seek()) {
+            force_loop_off(loop_finder::LoopTransportResetReason::unseekable,
+                           L"Loop: Off - source is not seekable");
+            return;
+        }
+
+        const auto result = loop_engine_.set_enabled(true);
+        if (!result.valid) {
+            force_loop_off(
+                loop_finder::LoopTransportResetReason::invalid_markers,
+                L"Loop: Off - markers are invalid");
+            return;
+        }
+
+        if (active_loop_panel_ != nullptr && active_loop_panel_ != this) {
+            active_loop_panel_->yield_loop_ownership();
+        }
+        if (!transport_.enable(loop_region(), true, transport_position())) {
+            force_loop_off(transport_.reset_reason(),
+                           L"Loop: Off - transport could not be armed");
+            return;
+        }
+        try {
+            transport_.set_paused(playback_->is_paused());
+        } catch (...) {
+            transport_.set_paused(true);
+        }
+        active_loop_panel_ = this;
+        editor_feedback_ = L"Loop: On (seek-based)";
+        sync_controls();
+        sync_cursor_timer();
         redraw(false, false);
     }
 
@@ -969,6 +1079,10 @@ private:
 
     void load_editor_for_track(const metadb_handle_ptr& track) noexcept {
         cancel_interaction(true);
+        transport_.reset(loop_finder::LoopTransportResetReason::track_changed);
+        if (active_loop_panel_ == this) {
+            active_loop_panel_ = nullptr;
+        }
         current_track_ = track;
         tap_tempo_.reset();
         std::string warning;
@@ -991,10 +1105,9 @@ private:
             const pfc::stringcvt::string_wide_from_utf8 wide(warning.c_str());
             editor_feedback_ = wide.get_ptr();
         } else if (saved.has_value()) {
-            editor_feedback_ = L"Saved grid and markers restored; Loop remains Off";
+            editor_feedback_ = L"Saved grid and markers restored; Loop: Off";
         } else {
-            editor_feedback_ =
-                L"Editor ready - Ctrl+T taps tempo; Loop audio arrives in M5";
+            editor_feedback_ = L"Editor ready - Ctrl+T taps tempo; Loop: Off";
         }
         sync_controls();
     }
@@ -1013,12 +1126,16 @@ private:
         }
     }
 
-    void clear_editor() noexcept {
+    void clear_editor(loop_finder::LoopTransportResetReason reason) noexcept {
         cancel_interaction(true);
+        transport_.reset(reason);
+        if (active_loop_panel_ == this) {
+            active_loop_panel_ = nullptr;
+        }
         current_track_.release();
         loop_engine_ = loop_finder::LoopEngine{};
         tap_tempo_.reset();
-        editor_feedback_ = L"No track - Loop Off";
+        editor_feedback_ = L"No track - Loop: Off";
         sync_controls();
     }
 
@@ -1772,7 +1889,13 @@ private:
             waveform_ = std::move(snapshot);
             waveform_state_ = WaveformState::available;
             analysis_error_.clear();
+            const double previous_in = loop_engine_.state().in_seconds;
+            const double previous_out = loop_engine_.state().out_seconds;
             clamp_engine_to_duration(loop_engine_, waveform_->duration_seconds);
+            if (loop_engine_.state().in_seconds != previous_in ||
+                loop_engine_.state().out_seconds != previous_out) {
+                reconfigure_transport_for_markers();
+            }
         } else {
             waveform_.reset();
             waveform_state_ = WaveformState::unavailable;
@@ -1906,6 +2029,7 @@ private:
                     ? loop_engine_.state().out_seconds
                     : loop_engine_.state().in_seconds;
                 if (current_seconds != previous_seconds) {
+                    reconfigure_transport_for_markers();
                     redraw_marker_drag(previous_seconds,
                                        current_seconds,
                                        dragging_out);
@@ -1958,6 +2082,7 @@ private:
         if (interaction_ == Interaction::marker_in ||
             interaction_ == Interaction::marker_out) {
             (void)loop_engine_.set_markers(drag_marker_in_, drag_marker_out_);
+            reconfigure_transport_for_markers();
             editor_feedback_ = L"Marker drag cancelled";
             redraw(false, false);
         }
@@ -1968,6 +2093,7 @@ private:
         if (interaction_ == Interaction::marker_in ||
             interaction_ == Interaction::marker_out) {
             (void)loop_engine_.set_markers(drag_marker_in_, drag_marker_out_);
+            reconfigure_transport_for_markers();
         }
         interaction_ = Interaction::none;
         if (release_capture && window_ != nullptr && GetCapture() == window_) {
@@ -1993,6 +2119,160 @@ private:
         playback_->playback_seek(normalized * waveform_->duration_seconds);
     }
 
+    void log_transport_request(
+        const loop_finder::LoopSeekRequest& request) noexcept {
+#ifndef NDEBUG
+        try {
+            FB2K_console_formatter()
+                << "Loop Finder M5: OUT crossing observed at "
+                << request.crossing_position_seconds << " s; seek IN "
+                << request.target_seconds << " s; overshoot "
+                << request.boundary_overshoot_seconds << " s; request "
+                << request.request_id;
+        } catch (...) {
+        }
+#else
+        (void)request;
+#endif
+    }
+
+    void log_completed_transport_timing() noexcept {
+#ifndef NDEBUG
+        const auto& timing = transport_.diagnostics();
+        if (!timing.has_value() ||
+            !timing->return_observed_after_seconds.has_value() ||
+            timing->request_id == logged_return_request_id_) {
+            return;
+        }
+        logged_return_request_id_ = timing->request_id;
+        try {
+            FB2K_console_formatter()
+                << "Loop Finder M5: request " << timing->request_id
+                << " observed back inside loop at "
+                << *timing->return_position_seconds << " s after "
+                << *timing->return_observed_after_seconds << " s";
+        } catch (...) {
+        }
+#endif
+    }
+
+    void observe_transport_position(double position) noexcept {
+        if (!loop_engine_.state().enabled ||
+            playback_state_ != PlaybackState::playing) {
+            return;
+        }
+
+        const auto prior_state = transport_.state();
+        const auto request = transport_.observe_position(
+            position, monotonic_seconds(), transport_.generation());
+        if (prior_state == loop_finder::LoopTransportState::manually_disarmed &&
+            transport_.state() == loop_finder::LoopTransportState::armed) {
+            editor_feedback_ =
+                L"Loop: On (seek-based) - playback re-entered region";
+            redraw(false, false);
+        }
+        log_completed_transport_timing();
+        if (!request.has_value()) {
+            return;
+        }
+        if (request->generation != transport_.generation() ||
+            !loop_engine_.state().enabled) {
+            return;
+        }
+
+        log_transport_request(*request);
+        queue_transport_seek(*request);
+    }
+
+    void execute_transport_seek(
+        const loop_finder::LoopSeekRequest& request) noexcept {
+        core_api::ensure_main_thread();
+        if (window_ == nullptr || active_loop_panel_ != this ||
+            !loop_engine_.state().enabled ||
+            !transport_.is_pending(request)) {
+            return;
+        }
+
+        try {
+            if (!playback_->is_playing()) {
+                force_loop_off(loop_finder::LoopTransportResetReason::stopped,
+                               L"Loop: Off - playback stopped");
+                return;
+            }
+
+            metadb_handle_ptr now_playing;
+            if (!playback_->get_now_playing(now_playing) ||
+                now_playing != current_track_) {
+                force_loop_off(
+                    loop_finder::LoopTransportResetReason::track_changed,
+                    L"Loop: Off - track changed");
+                return;
+            }
+
+            if (playback_->is_paused()) {
+                (void)transport_.update_markers(
+                    loop_region(), transport_position());
+                transport_.set_paused(true);
+                return;
+            }
+            if (!playback_->playback_can_seek()) {
+                force_loop_off(
+                    loop_finder::LoopTransportResetReason::unseekable,
+                    L"Loop: Off - source is not seekable");
+                return;
+            }
+
+            // This runs on a later main-loop turn, outside the playback
+            // callback that detected the crossing. Calling playback_seek()
+            // directly from on_playback_time triggers foobar2000's bug check.
+            playback_->playback_seek(request.target_seconds);
+        } catch (...) {
+            force_loop_off(loop_finder::LoopTransportResetReason::unseekable,
+                           L"Loop: Off - seek request failed");
+        }
+    }
+
+    void queue_transport_seek(
+        const loop_finder::LoopSeekRequest& request) noexcept {
+        try {
+            service_ptr_t<LoopFinderPanel> self = this;
+            fb2k::inMainThread([self, request] {
+                self->execute_transport_seek(request);
+            });
+        } catch (...) {
+            force_loop_off(loop_finder::LoopTransportResetReason::unseekable,
+                           L"Loop: Off - could not queue seek request");
+        }
+    }
+
+    void observe_transport_seek(double position) noexcept {
+        if (!loop_engine_.state().enabled) {
+            return;
+        }
+        const auto kind = transport_.observe_seek(
+            position, monotonic_seconds(), transport_.generation());
+        switch (kind) {
+        case loop_finder::SeekNotificationKind::manual_seek_inside:
+            editor_feedback_ =
+                L"Loop: On (seek-based) - manual seek inside re-armed";
+            redraw(false, false);
+            break;
+        case loop_finder::SeekNotificationKind::manual_seek_outside:
+            editor_feedback_ =
+                L"Loop: On - manual seek outside; waiting to re-enter region";
+            redraw(false, false);
+            break;
+        case loop_finder::SeekNotificationKind::automatic_seek:
+        case loop_finder::SeekNotificationKind::ignored:
+            break;
+        }
+    }
+
+    void process_playback_position(double position) noexcept {
+        set_playback_position(position);
+        observe_transport_position(position);
+    }
+
     void update_playback_cursor() noexcept {
         core_api::ensure_main_thread();
         if (playback_state_ != PlaybackState::playing ||
@@ -2000,7 +2280,7 @@ private:
             sync_cursor_timer();
             return;
         }
-        set_playback_position(playback_->playback_get_position());
+        process_playback_position(playback_->playback_get_position());
     }
 
     void set_playback_position(double position) noexcept {
@@ -2043,7 +2323,8 @@ private:
             return;
         }
         if (playback_state_ == PlaybackState::playing &&
-            waveform_state_ == WaveformState::available) {
+            (waveform_state_ == WaveformState::available ||
+             loop_engine_.state().enabled)) {
             SetTimer(window_,
                      kCursorTimer,
                      kCursorTimerMilliseconds,
@@ -2148,7 +2429,7 @@ private:
             paused ? PlaybackState::paused : PlaybackState::playing;
         track_title_ = "Opening...";
         clear_analysis();
-        clear_editor();
+        clear_editor(loop_finder::LoopTransportResetReason::track_changed);
         redraw();
     }
 
@@ -2164,22 +2445,24 @@ private:
         track_title_ = "No track";
         playback_position_ = 0.0;
         clear_analysis();
-        clear_editor();
+        clear_editor(loop_finder::LoopTransportResetReason::stopped);
         redraw();
     }
 
-    void on_playback_pause(bool) override {
+    void on_playback_pause(bool paused) override {
+        transport_.set_paused(paused);
         refresh_playback_snapshot();
     }
 
     void on_playback_seek(double time) override {
         core_api::ensure_main_thread();
         set_playback_position(time);
+        observe_transport_seek(time);
     }
 
     void on_playback_time(double time) override {
         core_api::ensure_main_thread();
-        set_playback_position(time);
+        process_playback_position(time);
     }
 
     void on_playback_edited(metadb_handle_ptr track) override {
@@ -2211,9 +2494,10 @@ private:
     double drag_marker_out_ = 4.0;
     metadb_handle_ptr current_track_;
     loop_finder::LoopEngine loop_engine_;
+    loop_finder::LoopTransport transport_;
     loop_finder::TapTempo tap_tempo_;
     std::wstring editor_feedback_ =
-        L"No track - Loop Off; audible looping arrives in M5";
+        L"No track - Loop: Off";
     HWND bpm_edit_ = nullptr;
     HWND tap_button_ = nullptr;
     HWND offset_edit_ = nullptr;
@@ -2222,6 +2506,7 @@ private:
     HWND set_out_button_ = nullptr;
     HWND loop_checkbox_ = nullptr;
     bool updating_controls_ = false;
+    std::uint64_t logged_return_request_id_ = 0;
     std::uint64_t analysis_generation_ = 0;
     std::string current_identity_;
     std::string analysis_error_;
@@ -2238,6 +2523,7 @@ private:
     HBRUSH background_brush_ = nullptr;
     COLORREF background_brush_color_ = CLR_INVALID;
     loop_finder::foobar::WaveformAnalysis analysis_;
+    inline static LoopFinderPanel* active_loop_panel_ = nullptr;
 };
 
 // The SDK's ui_element_impl helper uses ATL/WTL. This equivalent lifetime

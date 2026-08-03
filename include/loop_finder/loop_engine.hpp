@@ -32,9 +32,6 @@ public:
                                          double track_duration_seconds);
     ValidationResult set_enabled(bool enabled);
 
-    // Returns the seek target when playback has reached the loop boundary.
-    [[nodiscard]] std::optional<double> seek_target(double playback_seconds,
-                                                    bool is_seeking = false) const;
     [[nodiscard]] double loop_length_seconds() const noexcept;
     [[nodiscard]] double loop_length_beats() const noexcept;
     [[nodiscard]] std::optional<double> loop_length_bars() const noexcept;

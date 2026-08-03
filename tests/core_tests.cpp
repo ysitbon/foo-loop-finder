@@ -1,5 +1,6 @@
 #include "loop_finder/beat_grid.hpp"
 #include "loop_finder/loop_engine.hpp"
+#include "loop_finder/loop_transport.hpp"
 #include "loop_finder/tap_tempo.hpp"
 #include "loop_finder/waveform.hpp"
 
@@ -55,11 +56,7 @@ int main() {
     check(engine.set_out(3.1).valid && near(engine.state().out_seconds, 3.0),
           "OUT snaps to nearest beat");
     check(near(engine.loop_length_beats(), 4.0), "loop beat length calculated");
-    check(!engine.seek_target(3.0).has_value(), "disabled loop never seeks");
     check(engine.set_enabled(true).valid, "loop enables explicitly");
-    check(near(*engine.seek_target(3.0), 1.0), "OUT seeks to IN");
-    check(!engine.seek_target(2.99).has_value(), "no early seek");
-    check(!engine.seek_target(3.1, true).has_value(), "user seek is not intercepted");
 
     LoopEngine snapping;
     check(snapping.set_markers(1.13, 3.13).valid,
@@ -150,6 +147,178 @@ int main() {
     check(!restored.state().enabled && near(restored.state().bpm, 92.5) &&
               near(restored.state().in_seconds, 1.1),
           "restoration preserves editor metadata but forces Loop off");
+
+    LoopTransport initial_transport;
+    check(!initial_transport.enabled() &&
+              initial_transport.state() == LoopTransportState::disabled,
+          "transport is disabled initially");
+    check(!initial_transport.observe_position(
+               4.0, 0.0, initial_transport.generation()).has_value(),
+          "disabled transport never requests a seek");
+
+    LoopTransport crossing;
+    check(crossing.enable({1.0, 3.0}, true, 1.25),
+          "valid seekable loop arms transport");
+    const auto crossing_generation = crossing.generation();
+    check(!crossing.observe_position(2.9, 10.0, crossing_generation).has_value(),
+          "positions below OUT do not seek");
+    const auto first_seek =
+        crossing.observe_position(3.2, 10.1, crossing_generation);
+    check(first_seek.has_value() && near(first_seek->target_seconds, 1.0) &&
+              near(first_seek->crossing_position_seconds, 3.2) &&
+              near(first_seek->boundary_overshoot_seconds, 0.2) &&
+              crossing.is_pending(*first_seek),
+          "crossing OUT requests IN and records overshoot");
+    check(crossing.state() == LoopTransportState::automatic_seek_pending &&
+              !crossing.observe_position(
+                   3.3, 10.2, crossing_generation).has_value(),
+          "callbacks beyond OUT do not duplicate a pending seek");
+    check(crossing.observe_seek(1.0, 10.25, crossing_generation) ==
+              SeekNotificationKind::automatic_seek &&
+              crossing.state() == LoopTransportState::waiting_for_loop_in &&
+              !crossing.is_pending(*first_seek),
+          "automatic seek callback is consumed explicitly");
+    check(!crossing.observe_position(
+               1.03, 10.3, crossing_generation).has_value() &&
+              crossing.state() == LoopTransportState::armed,
+          "observing playback near IN re-arms transport");
+    check(crossing.diagnostics().has_value() &&
+              crossing.diagnostics()->return_observed_after_seconds.has_value() &&
+              near(*crossing.diagnostics()->return_observed_after_seconds, 0.2),
+          "automatic seek return timing is recorded");
+
+    LoopTransport position_acknowledged;
+    check(position_acknowledged.enable({1.0, 2.0}, true, 1.8),
+          "position-only automatic seek setup arms");
+    const auto position_ack_generation = position_acknowledged.generation();
+    check(position_acknowledged.observe_position(
+              2.1, 10.0, position_ack_generation).has_value() &&
+              !position_acknowledged.observe_position(
+                   1.05, 10.1, position_ack_generation).has_value() &&
+              position_acknowledged.state() == LoopTransportState::armed,
+          "position observed inside can complete an automatic seek safely");
+
+    LoopTransport overshoot;
+    check(overshoot.enable({1.0, 2.0}, true, 0.25),
+          "coarse crossing setup arms");
+    const auto overshoot_generation = overshoot.generation();
+    const auto coarse_seek =
+        overshoot.observe_position(2.75, 1.0, overshoot_generation);
+    check(coarse_seek.has_value() && near(coarse_seek->target_seconds, 1.0) &&
+              near(coarse_seek->boundary_overshoot_seconds, 0.75),
+          "coarse callback interval still detects an OUT crossing");
+
+    LoopTransport manual_inside;
+    check(manual_inside.enable({1.0, 3.0}, true, 1.2),
+          "inside manual seek setup arms");
+    const auto manual_inside_generation = manual_inside.generation();
+    check(manual_inside.observe_seek(2.0, 2.0, manual_inside_generation) ==
+              SeekNotificationKind::manual_seek_inside &&
+              manual_inside.state() == LoopTransportState::armed,
+          "manual seek inside the loop re-arms without seeking");
+    check(!manual_inside.observe_position(
+               2.5, 2.1, manual_inside_generation).has_value(),
+          "manual seek callback does not itself trigger an automatic seek");
+    check(manual_inside.observe_position(
+              3.0, 2.2, manual_inside_generation).has_value(),
+          "normal playback after inside manual seek may cross OUT");
+
+    LoopTransport manual_outside;
+    check(manual_outside.enable({1.0, 3.0}, true, 1.5),
+          "outside manual seek setup arms");
+    const auto manual_outside_generation = manual_outside.generation();
+    check(manual_outside.observe_seek(4.0, 3.0, manual_outside_generation) ==
+              SeekNotificationKind::manual_seek_outside &&
+              manual_outside.state() == LoopTransportState::manually_disarmed,
+          "manual seek outside is accepted and disarms transport");
+    check(!manual_outside.observe_position(
+               4.5, 3.1, manual_outside_generation).has_value() &&
+              !manual_outside.observe_position(
+                   0.5, 3.2, manual_outside_generation).has_value(),
+          "outside manual seek never snaps back to IN");
+    check(!manual_outside.observe_position(
+               1.5, 3.3, manual_outside_generation).has_value() &&
+              manual_outside.state() == LoopTransportState::armed,
+          "playback observed inside after outside seek re-arms");
+
+    LoopTransport cancelled;
+    check(cancelled.enable({1.0, 2.0}, true, 1.5),
+          "pending cancellation setup arms");
+    auto cancelled_generation = cancelled.generation();
+    check(cancelled.observe_position(
+              2.0, 4.0, cancelled_generation).has_value(),
+          "pending cancellation setup requests seek");
+    cancelled.reset(LoopTransportResetReason::loop_disabled);
+    check(cancelled.state() == LoopTransportState::disabled &&
+              cancelled.observe_seek(1.0, 4.1, cancelled_generation) ==
+                  SeekNotificationKind::ignored,
+          "toggle-off clears pending automatic-seek state");
+
+    LoopTransport paused_transport;
+    check(paused_transport.enable({1.0, 2.0}, true, 1.9),
+          "pause setup arms");
+    const auto paused_generation = paused_transport.generation();
+    paused_transport.set_paused(true);
+    check(!paused_transport.observe_position(
+               2.1, 5.0, paused_generation).has_value(),
+          "paused transport never seeks");
+    paused_transport.set_paused(false);
+    check(paused_transport.observe_position(
+              2.1, 5.1, paused_generation).has_value(),
+          "resume safely observes the pending forward crossing");
+    paused_transport.reset(LoopTransportResetReason::stopped);
+    check(!paused_transport.enabled() &&
+              paused_transport.reset_reason() ==
+                  LoopTransportResetReason::stopped,
+          "stop disables and resets transport");
+    check(paused_transport.enable({1.0, 2.0}, true, 1.2),
+          "track reset setup re-arms");
+    paused_transport.reset(LoopTransportResetReason::track_changed);
+    check(!paused_transport.enabled() &&
+              paused_transport.reset_reason() ==
+                  LoopTransportResetReason::track_changed,
+          "track change disables and resets transport");
+
+    LoopTransport invalid_transport;
+    check(!invalid_transport.enable({2.0, 2.0}, true, 2.0) &&
+              invalid_transport.reset_reason() ==
+                  LoopTransportResetReason::invalid_markers &&
+              !invalid_transport.observe_position(
+                   3.0, 0.0, invalid_transport.generation()).has_value(),
+          "invalid markers safely disable transport");
+    check(!invalid_transport.enable({1.0, 2.0}, false, 1.5) &&
+              invalid_transport.reset_reason() ==
+                  LoopTransportResetReason::unseekable,
+          "unseekable source safely disables transport");
+
+    LoopTransport marker_generation;
+    check(marker_generation.enable({1.0, 2.0}, true, 1.5),
+          "marker generation setup arms");
+    const auto stale_generation = marker_generation.generation();
+    check(marker_generation.update_markers({1.25, 2.5}, 1.5),
+          "marker change reconfigures transport");
+    check(!marker_generation.observe_position(
+               3.0, 6.0, stale_generation).has_value(),
+          "marker changes invalidate stale position events");
+    const auto current_marker_generation = marker_generation.generation();
+    check(marker_generation.observe_position(
+              2.75, 6.1, current_marker_generation).has_value(),
+          "new marker generation detects its own forward crossing");
+
+    LoopTransport short_loop;
+    check(short_loop.enable({1.0, 1.001}, true, 0.999),
+          "very short valid loop arms");
+    const auto short_generation = short_loop.generation();
+    check(short_loop.observe_position(
+              1.002, 7.0, short_generation).has_value(),
+          "very short loop requests one seek at crossing");
+    check(!short_loop.observe_position(
+               1.003, 7.0, short_generation).has_value() &&
+              short_loop.observe_seek(1.0, 7.0, short_generation) ==
+                  SeekNotificationKind::automatic_seek &&
+              !short_loop.observe_position(
+                   1.002, 7.0, short_generation).has_value(),
+          "very short loop cannot recursively request before IN is observed");
 
     TapTempo tap;
     check(!tap.tap(10.0).bpm.has_value() &&

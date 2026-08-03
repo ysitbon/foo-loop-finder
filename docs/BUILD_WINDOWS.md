@@ -105,7 +105,7 @@ references:
 
 It compiles `src\foobar\component.cpp`, `src\foobar\editor_persistence.cpp`,
 `src\foobar\ui_element.cpp`, `src\foobar\waveform_analysis.cpp` and the
-platform-independent core sources, including tap tempo.
+platform-independent core sources, including `LoopTransport` and tap tempo.
 It does not copy or modify SDK sources.
 
 The official SDK's Win32/x64 project configurations name toolset `v142` for
@@ -123,8 +123,9 @@ prompted. Return to **Preferences → Components** and confirm that **Loop Finde
 After restart, enable Default UI layout editing, add **Loop Finder** from the
 **Playback Information** group, then disable layout editing. The panel displays
 the current track title, Playing/Paused/Stopped state, waveform analysis status,
-waveform and playback cursor, and the M4 editor. **Loop (editor only)** is Off
-after startup and track changes and does not cause audible looping until M5.
+waveform and playback cursor, and the rhythmic editor. **Loop (seek-based)** is
+Off after startup and track changes; when explicitly enabled on seekable media,
+it uses ordinary foobar2000 seeks to return from OUT to IN.
 
 The waveform opens as a whole-track overview. Click to seek, use the mouse
 wheel over it to zoom, drag horizontally to navigate, and double-click to reset
@@ -169,7 +170,8 @@ The Release build and package check do not replace this runtime test:
 
 ## M4 manual verification
 
-The Release build and package inspection do not replace this runtime test:
+This records the historical M4 acceptance procedure. The Release build and
+package inspection did not replace this runtime test:
 
 1. In **File → Preferences → Components**, uninstall the prior Loop Finder if
    necessary, install `build\foo_loop_finder.fb2k-component`, apply, and restart
@@ -220,6 +222,59 @@ waveform or grid. Marker and duration text refreshes on release. A small 50 ms
 playback-cursor timer pattern may remain visible in CPU graphs while playing,
 but it should return to the idle baseline when playback stops and must not
 impair playback or UI response.
+
+## M5 manual verification
+
+The native build and package inspection do not replace this runtime test. Keep
+all items open until they are observed with the newly installed M5 component:
+
+1. Install `build\foo_loop_finder.fb2k-component`, restart foobar2000 and
+   confirm **Loop Finder 0.1.0** loads and the panel says **Loop: Off**.
+2. Create a short loop, enable **Loop (seek-based)** and let it repeat many
+   times. Confirm each normal forward OUT crossing returns once to IN without a
+   seek storm, frozen transport, foobar2000 bug check or UI/audio lockup. This
+   specifically regresses the deferred-seek fix for the `on_playback_time`
+   crash found during the first M5 runtime attempt.
+3. Repeat with a multi-bar loop and with callback overshoot near OUT. Confirm
+   one seek occurs per traversal and playback below OUT is not redirected.
+4. While Loop is on, seek manually to several points inside `[IN, OUT)`.
+   Confirm each location is accepted, no immediate component seek occurs, and
+   the next normal OUT crossing loops.
+5. Seek manually before IN and after OUT. Confirm playback is not snapped back
+   and Loop remains disarmed until playback is observed inside the region. Also
+   confirm toggling Loop off/on resets that disarm without an immediate seek.
+6. Scrub rapidly inside and outside the region. Confirm every seek callback is
+   treated as manual unless it acknowledges the component's pending IN target,
+   and no recursive or duplicate seeks occur.
+7. Pause just before and at OUT, wait, then resume. Confirm no seek happens
+   while paused and resume remains responsive.
+8. Stop and start playback. Confirm stop forces Loop off, the next start does
+   not restore it, and saved grid/markers remain independent from Loop state.
+9. Use next/previous track repeatedly, including near OUT. Confirm every track
+   change forces Loop off and no callback from the prior track causes a seek.
+10. With Loop enabled, move IN and OUT using buttons and continuous marker
+    dragging. Confirm the current automatic intent is cancelled/re-evaluated,
+    rejected marker ordering still preserves M4 state, and there is no stale
+    seek to an older target.
+11. Toggle Loop rapidly around OUT. Confirm off cancels pending work
+    immediately and on never produces more than one seek for a forward crossing.
+12. If an unseekable stream/source is available, try enabling Loop. Confirm it
+    returns to Off with the concise **source is not seekable** status and does
+    not retry continuously. Record this item as unavailable if no such source
+    can be tested.
+13. Restart foobar2000 with saved markers on several tracks. Confirm markers
+    return but Loop is Off on startup and remains Off until explicitly enabled.
+14. Expect an audible gap or click at ordinary seek boundaries; M5 does not
+    claim click-free or sample-accurate playback. For jitter diagnostics, run a
+    Debug build and inspect foobar2000's console entries for observed OUT
+    position, requested IN, overshoot, first position back inside and elapsed
+    request-to-observation time. Repeat representative short and multi-bar
+    loops and report only the values actually observed.
+15. If the layout contains multiple Loop Finder panels, arm each in turn and
+    confirm the prior panel is disarmed so the component still makes one seek.
+
+Callback scheduling, decoder seeking and output buffering are host/source
+dependent. Buffered and crossfaded click reduction remains M7 work.
 
 ## Common errors
 

@@ -99,6 +99,7 @@
     <ClCompile Include="$(ProjectDir)..\src\foobar\waveform_analysis.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\beat_grid.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\loop_engine.cpp" />
+    <ClCompile Include="$(ProjectDir)..\src\core\loop_transport.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\tap_tempo.cpp" />
     <ClCompile Include="$(ProjectDir)..\src\core\waveform.cpp" />
   </ItemGroup>

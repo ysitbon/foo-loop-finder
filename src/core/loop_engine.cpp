@@ -154,15 +154,6 @@ ValidationResult LoopEngine::set_enabled(bool enabled) {
     state_ = next; return ok();
 }
 
-std::optional<double> LoopEngine::seek_target(double playback_seconds,
-                                              bool is_seeking) const {
-    if (!state_.enabled || is_seeking || !std::isfinite(playback_seconds))
-        return std::nullopt;
-    if (playback_seconds >= state_.out_seconds)
-        return state_.in_seconds;
-    return std::nullopt;
-}
-
 double LoopEngine::loop_length_seconds() const noexcept {
     return state_.out_seconds - state_.in_seconds;
 }

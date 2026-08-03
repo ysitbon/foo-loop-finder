@@ -12,6 +12,8 @@ test.
 ```mermaid
 flowchart TD
     FB["foobar2000 playback"] --> Adapter["foobar adapter"]
+    Adapter --> Transport["portable LoopTransport"]
+    Transport --> Adapter
     Adapter --> Core["loop and beat-grid core"]
     Store["foobar per-track index"] <--> Adapter
     Decoder["owned background decoder"] --> Waveform["bounded waveform cache"]
@@ -40,6 +42,8 @@ Responsibilities:
 - `LoopState`: BPM, grid offset, meter, subdivision, IN/OUT and opt-in state.
 - `LoopEngine`: validated BPM, phase, meter, snapping, marker, enable and
   track-duration-clamping transitions plus loop metrics.
+- `LoopTransport`: explicitly stateful, generation-checked OUT-crossing and
+  manual/automatic-seek coordination with no SDK or UI types.
 - `beat_grid`: beat duration, marker snapping and bounded visible grid-line
   generation with subdivision/beat/bar classification.
 - `TapTempo`: timeout-aware rolling-median tempo calculation from monotonic tap
@@ -75,11 +79,12 @@ Current responsibilities:
 - Keep an eight-entry in-memory LRU cache.
 - Translate M4 controls and marker gestures into `LoopEngine` transitions.
 - Persist versioned per-track editor records through `metadb_index_manager`.
+- Feed main-thread playback-time, playback-seek and polled position events into
+  `LoopTransport`, then issue accepted seek requests through `playback_control`.
+- Force Loop off on stop, track change, shutdown and unseekable media.
 
 Later responsibilities:
 
-- Seek from OUT to IN when looping is enabled.
-- Prevent feedback loops and avoid intercepting user seeks.
 - Persist later automatic-analysis outputs separately from manual overrides.
 
 The adapter owns SDK objects and threading rules. SDK types must not leak into
@@ -110,10 +115,10 @@ The panel is a native child window under `src/foobar`. It follows
 the SDK's `ui_element`/`ui_element_instance` pattern, consumes the host's color
 and font callbacks, and scales its layout from the window DPI. Persistent native
 edit, button, combo-box and checkbox children provide BPM, tap tempo, phase,
-snapping, Set IN/OUT and editor-only Loop controls. Enter or focus loss commits
+snapping, Set IN/OUT and seek-based Loop controls. Enter or focus loss commits
 numeric edits, Escape restores the last valid value, and Ctrl+T records a tap.
-All editor changes request validated core transitions. The Loop toggle does not
-control playback until M5.
+All editor changes request validated core transitions. The Loop toggle controls
+the M5 transport but is never persisted.
 
 The waveform opens in a whole-track overview. Mouse-wheel zoom is centered on
 the pointer, dragging pans a zoomed viewport, and double-click restores the
@@ -132,13 +137,58 @@ request state changes; they do not mutate audio-thread state directly.
 
 ### Initial transport
 
-The first functional loop implementation observes playback position. Once the
-position reaches OUT and Loop is enabled, it requests a seek to IN. It must
-distinguish its own automatic seek from a user seek and tolerate callback
-jitter.
+M5 uses foobar2000's main-thread `on_playback_time` and `on_playback_seek`
+callbacks together with the panel's existing 50 ms playback-position timer.
+The timer also runs while Loop is enabled before waveform analysis completes.
+Only the adapter calls `playback_control::playback_seek`; transport decisions
+remain portable and painting never performs transport work. A callback records
+the request and queues `fb2k::inMainThread`, so the actual seek runs on a later
+main-loop turn rather than re-entrantly inside `on_playback_time`. The deferred
+handler revalidates the request ID and generation, active panel, current track,
+Loop state, pause state and seekability before touching playback control.
 
-This implementation validates product behavior but may have an audible gap or
-click at the boundary.
+`LoopTransport` has these explicit states:
+
+- `disabled`: no request is possible; the reset reason records Loop off, stop,
+  track change, invalid markers, unseekable media or component shutdown;
+- `armed`: a prior position below OUT establishes a normal forward crossing;
+- `automatic_seek_pending`: one generation- and request-ID-bearing IN seek has
+  been returned to the adapter, so repeated callbacks beyond OUT are ignored;
+- `waiting_for_loop_in`: the matching automatic seek callback has been consumed
+  and playback must next be observed back inside the loop before re-arming;
+- `manually_disarmed`: a user seek outside the loop is accepted and no automatic
+  seek is allowed until playback is observed inside again.
+
+Every Loop activation and marker change increments a transport generation.
+Requests carry that generation and a monotonically increasing request ID.
+Loop off, stop, track change and shutdown clear pending intent; old-generation
+events are ignored. Marker changes cancel pending intent and establish a new
+baseline from the current position, so an already-past-OUT callback cannot
+immediately seek. If more than one Loop Finder panel exists, arming one panel
+disarms the previous owner to prevent duplicate component seeks.
+
+Manual seek notifications are never passed through forward-crossing logic.
+A seek inside `[IN, OUT)` re-arms at the accepted location. A seek outside enters
+`manually_disarmed` without snapping back; observation inside the interval, or
+an explicit Loop off/on cycle, makes a later normal crossing eligible again.
+While an automatic request is pending, only a callback near its target and with
+the current generation consumes that intent. The state then waits for a later
+position observation inside the loop, preventing recursive seeks even for very
+short regions.
+
+This implementation uses ordinary host seek operations rather than an audio
+buffer or DSP boundary. Callback scheduling, output buffering and decoder seek
+behavior therefore add host- and source-dependent latency and can produce an
+audible gap or click. It is not click-free or sample-accurate; buffered,
+crossfaded looping is deferred to M7.
+
+Portable diagnostics retain the observed crossing position, requested IN,
+OUT overshoot, the first position observed back inside, and elapsed wall time
+from request to that observation. Debug native builds emit one foobar2000
+console line at the request and one on return; Release builds stay silent.
+Boundary jitter is evaluated by repeating loops and comparing these values with
+OUT/IN. No latency or jitter number is documented until an actual foobar2000
+run records it.
 
 ### Later click-free transport
 
@@ -169,10 +219,10 @@ Track analysis is performed outside the real-time playback path:
 The worker is owned by the panel analysis controller; it is never detached.
 Destruction disables queued delivery, signals cancellation, and joins the
 worker before releasing state. No `playback_control` or panel/window operation
-is performed by the worker. A 50 ms main-thread timer is active only while a
-waveform is available and playback is running; cursor work is skipped until it
-crosses a display pixel, and the timer is stopped on pause, stop and
-destruction.
+is performed by the worker. A 50 ms main-thread timer is active while playback
+is running and either a waveform is available or seek-based Loop is enabled.
+Cursor work is skipped until it crosses a display pixel, transport work is
+constant-time, and the timer is stopped on pause, stop and destruction.
 
 The LRU holds at most eight resolution-independent snapshots (up to 262,144
 bins per track, about 24 MiB total for bin payloads at full resolution). It is

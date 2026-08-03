@@ -100,6 +100,15 @@ still changes editor state only and does not seek playback.
 Acceptance evidence: repeatedly loop short and multi-bar regions, manually seek
 inside and outside them, and change tracks without transport lockups.
 
+Implementation evidence on 2026-08-03: the portable generation-aware transport
+tests pass, Release x64 builds against SDK 2025-03-07, and package inspection
+places `foo_loop_finder.dll` at the archive root. The checkboxes remain open
+until the new component is installed and its transport behavior and boundary
+jitter are observed in foobar2000. An initial runtime attempt exposed and
+documented foobar2000's bug check when `playback_seek()` was called re-entrantly
+from `on_playback_time`; automatic seeks are now deferred to a separately
+queued main-thread callback, and that fix still requires runtime retesting.
+
 ## M6 — Automatic tempo analysis
 
 - [ ] Evaluate the BPM/beat library and its redistribution licence.
@@ -136,5 +145,7 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Begin M5 playback-looping design and implementation. Preserve manual-seek
-behavior and add OUT-to-IN seeking only while Loop is explicitly enabled.
+Install the M5 package and complete playback-looping runtime acceptance,
+including manual-seek behavior, unseekable handling when available, restart
+safety and measured boundary diagnostics. Do not begin M6 until that evidence
+is recorded.

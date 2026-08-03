@@ -13,7 +13,7 @@ drum patterns over them.
 - Editable 20-300 BPM and robust four-tap tempo entry
 - Beat, subdivision and emphasized bar overlays
 - Per-track grid and marker persistence
-- Opt-in editor Loop state, always disabled on startup and track changes
+- Opt-in seek-based Loop transport, always disabled on startup and track changes
 - Platform-independent core with unit tests
 - Installable x64 foobar2000 component registration
 - Default UI panel with current title, playback state and entire-track waveform
@@ -23,8 +23,9 @@ drum patterns over them.
 The native component registers **Loop Finder 0.1.0** and provides a **Loop
 Finder** Default UI element. The panel displays the current title,
 Playing/Paused/Stopped state, analysis status, waveform and playback cursor,
-plus the M4 rhythmic editor. The visible Loop control arms editor state only;
-audible OUT-to-IN playback starts in M5 and is intentionally absent here.
+plus the rhythmic editor. The visible Loop control now seeks from OUT to IN
+after a normal forward crossing. It uses ordinary foobar2000 seeks, so an
+audible boundary gap or click is expected until the later buffered M7 design.
 
 Editor controls:
 
@@ -34,7 +35,9 @@ Editor controls:
 - Select free placement, 1 beat, 1/2, 1/4, 1/8 or 1/16 beat snapping.
 - Use **Set IN** / **Set OUT** at the playback cursor or drag marker lines.
 - Inspect loop time, seconds, beats and meaningful whole-bar duration.
-- Arm **Loop (editor only)** without changing playback behavior.
+- Arm **Loop (seek-based)** to audition the selected region.
+- Seek manually inside to re-arm, or outside to leave playback there until it
+  is observed inside the loop again.
 
 Waveform interactions:
 
@@ -124,7 +127,7 @@ ctest --test-dir build\core --output-on-failure
 
 ## Roadmap
 
-1. Manually accept the M4 editor in foobar2000
-2. Connect playback callbacks and seek from OUT to IN for M5
-3. Add automatic BPM/beat detection
+1. Complete M5 transport and boundary-jitter acceptance in foobar2000
+2. Add automatic BPM/beat detection in M6
+3. Add buffered/crossfaded looping in M7
 4. Add synchronized Boom bap, Funk, Rock and Jazz drum DSP
