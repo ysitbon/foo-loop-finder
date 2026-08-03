@@ -75,6 +75,7 @@ the fixes without crashes, stale results or playback/UI regressions.
 - [x] Display loop duration in time, beats and bars.
 - [x] Add a Loop toggle that is disabled by default.
 - [x] Persist per-track grid and marker state without persisting active Loop.
+- [x] Complete runtime acceptance in foobar2000.
 
 Acceptance evidence: edit a loop visually, reload the track and confirm markers
 return while Loop remains disabled. Implementation evidence is complete: core
@@ -83,8 +84,9 @@ places the DLL at the archive root. The initial manual foobar2000 pass on
 2026-08-02 covered the complete M4 checklist. Focused retesting confirmed the
 Escape restoration fix, then identified caret reset after Enter and continued
 marker-drag repainting while stopped. The next build preserves the edit
-selection and limits drag paints to changed marker strips; those two changes
-still require runtime retesting. M4 is not accepted on build evidence alone.
+selection and limits drag paints to changed marker strips. Focused manual
+retesting on 2026-08-03 confirmed both fixes. M4 is accepted; the Loop control
+still changes editor state only and does not seek playback.
 
 ## M5 — Playback looping
 
@@ -134,7 +136,5 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Focused manual retest of M4 in foobar2000: confirm Enter preserves a useful
-caret position and marker dragging no longer causes broad repainting while
-playing or stopped. Do not begin M5 playback looping until M4 runtime
-acceptance is complete.
+Begin M5 playback-looping design and implementation. Preserve manual-seek
+behavior and add OUT-to-IN seeking only while Loop is explicitly enabled.
