@@ -399,13 +399,29 @@ private:
                                                    UINT_PTR,
                                                    DWORD_PTR reference) noexcept {
         auto* panel = reinterpret_cast<LoopFinderPanel*>(reference);
+        const bool is_numeric_edit =
+            control == panel->bpm_edit_ || control == panel->offset_edit_;
+        if (message == WM_GETDLGCODE && is_numeric_edit) {
+            const LRESULT base = DefSubclassProc(control,
+                                                 message,
+                                                 wparam,
+                                                 lparam);
+            const auto* key_message = reinterpret_cast<const MSG*>(lparam);
+            if (key_message != nullptr &&
+                key_message->message == WM_KEYDOWN &&
+                (key_message->wParam == VK_RETURN ||
+                 key_message->wParam == VK_ESCAPE)) {
+                return base | DLGC_WANTMESSAGE;
+            }
+            return base;
+        }
         if (message == WM_KEYDOWN) {
             if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
                 (wparam == 'T' || wparam == 't')) {
                 panel->record_tap();
                 return 0;
             }
-            if (control == panel->bpm_edit_ || control == panel->offset_edit_) {
+            if (is_numeric_edit) {
                 if (wparam == VK_RETURN) {
                     if (control == panel->bpm_edit_) panel->commit_bpm();
                     else panel->commit_offset();
@@ -416,6 +432,10 @@ private:
                     return 0;
                 }
             }
+        } else if (message == WM_CHAR && is_numeric_edit &&
+                   (wparam == VK_RETURN || wparam == VK_ESCAPE)) {
+            // The corresponding WM_KEYDOWN already committed or restored.
+            return 0;
         } else if (message == WM_NCDESTROY) {
             RemoveWindowSubclass(control,
                                  &LoopFinderPanel::control_subclass_proc,
@@ -724,7 +744,7 @@ private:
                                10).c_str());
         }
         editor_feedback_ = L"Last valid value restored";
-        redraw(false);
+        redraw(false, false);
     }
 
     void commit_bpm() noexcept {
@@ -734,20 +754,20 @@ private:
         const auto value = parse_number(bpm_edit_);
         if (!value.has_value()) {
             editor_feedback_ = L"BPM must be a finite number from 20 to 300";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         const auto result = loop_engine_.set_bpm(*value);
         if (!result.valid) {
             editor_feedback_ = L"BPM must be from 20 to 300";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         SetWindowTextW(bpm_edit_,
                        format_number(loop_engine_.state().bpm).c_str());
         editor_feedback_ = L"BPM updated; markers were not moved";
         persist_editor();
-        redraw(false);
+        redraw(false, true);
     }
 
     void commit_offset() noexcept {
@@ -757,13 +777,13 @@ private:
         const auto milliseconds = parse_number(offset_edit_);
         if (!milliseconds.has_value()) {
             editor_feedback_ = L"Grid offset must be a finite millisecond value";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         const auto result = loop_engine_.set_grid_offset(*milliseconds / 1000.0);
         if (!result.valid) {
             editor_feedback_ = L"Grid offset must be finite";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         SetWindowTextW(offset_edit_,
@@ -772,7 +792,7 @@ private:
                            10).c_str());
         editor_feedback_ = L"Grid phase updated; markers were not moved";
         persist_editor();
-        redraw(false);
+        redraw(false, true);
     }
 
     void on_command(int identifier, int notification) noexcept {
@@ -821,14 +841,14 @@ private:
                 feedback << L" - new sequence after timeout";
             }
             editor_feedback_ = feedback.str();
-            redraw(false);
+            redraw(false, false);
             return;
         }
 
         const auto result = loop_engine_.set_bpm(*tap.bpm);
         if (!result.valid) {
             editor_feedback_ = L"Tapped tempo is outside 20-300 BPM";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         SetWindowTextW(bpm_edit_,
@@ -838,7 +858,7 @@ private:
                  << loop_engine_.state().bpm << L" BPM (Ctrl+T)";
         editor_feedback_ = feedback.str();
         persist_editor();
-        redraw(false);
+        redraw(false, true);
     }
 
     void change_snapping() noexcept {
@@ -851,12 +871,12 @@ private:
         if (!result.valid) {
             editor_feedback_ = L"Unsupported snapping selection";
             sync_controls();
-            redraw(false);
+            redraw(false, false);
             return;
         }
         editor_feedback_ = L"Snapping changed; existing markers were not moved";
         persist_editor();
-        redraw(false);
+        redraw(false, true);
     }
 
     double track_duration() const noexcept {
@@ -880,7 +900,7 @@ private:
         const double duration = track_duration();
         if (duration <= 0.0) {
             editor_feedback_ = L"Markers require a track with a known duration";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         const auto result = is_in
@@ -890,13 +910,13 @@ private:
             editor_feedback_ = is_in
                 ? L"IN was rejected: it must remain before OUT"
                 : L"OUT was rejected: it must remain after IN";
-            redraw(false);
+            redraw(false, false);
             return;
         }
         editor_feedback_ = is_in ? L"IN set from playback position"
                                  : L"OUT set from playback position";
         persist_editor();
-        redraw(false);
+        redraw(false, false);
     }
 
     void change_loop_enabled() noexcept {
@@ -906,13 +926,13 @@ private:
         if (!result.valid) {
             editor_feedback_ = L"Loop could not be armed with invalid markers";
             sync_controls();
-            redraw(false);
+            redraw(false, false);
             return;
         }
         editor_feedback_ = requested
             ? L"Loop armed in editor only - audible looping arrives in M5"
             : L"Loop disarmed";
-        redraw(false);
+        redraw(false, false);
     }
 
     void persist_editor() noexcept {
@@ -1156,14 +1176,14 @@ private:
         } else {
             draw_waveform_layer(
                 dc, bounds, foreground, background, font, line_height);
-            draw_editor_overlays(dc,
-                                 waveform_graph_bounds(bounds, line_height),
-                                 foreground,
-                                 background,
-                                 font);
+            draw_grid_overlay(dc,
+                              waveform_graph_bounds(bounds, line_height),
+                              foreground,
+                              background);
         }
 
         const RECT graph = waveform_graph_bounds(bounds, line_height);
+        draw_markers(dc, graph, foreground, background, font);
         draw_cursor(dc, graph);
     }
 
@@ -1218,11 +1238,10 @@ private:
         BitBlt(memory_dc, 0, 0, width, height, waveform_dc, 0, 0, SRCCOPY);
         SelectObject(memory_dc, font);
         const RECT local_bounds{0, 0, width, height};
-        draw_editor_overlays(memory_dc,
-                             waveform_graph_bounds(local_bounds, line_height),
-                             foreground,
-                             background,
-                             font);
+        draw_grid_overlay(memory_dc,
+                          waveform_graph_bounds(local_bounds, line_height),
+                          foreground,
+                          background);
 
         SelectObject(waveform_dc, previous_waveform);
         SelectObject(memory_dc, previous_bitmap);
@@ -1434,11 +1453,10 @@ private:
                                              (graph.right - graph.left - 1));
     }
 
-    void draw_editor_overlays(HDC dc,
-                              const RECT& graph,
-                              COLORREF foreground,
-                              COLORREF background,
-                              HFONT font) noexcept {
+    void draw_grid_overlay(HDC dc,
+                           const RECT& graph,
+                           COLORREF foreground,
+                           COLORREF background) noexcept {
         if (!waveform_ || waveform_->duration_seconds <= 0.0 ||
             graph.right <= graph.left || graph.bottom <= graph.top) {
             return;
@@ -1508,6 +1526,13 @@ private:
             // Overlay failures must not invalidate the cached waveform layer.
         }
 
+    }
+
+    void draw_markers(HDC dc,
+                      const RECT& graph,
+                      COLORREF foreground,
+                      COLORREF background,
+                      HFONT font) noexcept {
         draw_marker(dc,
                     graph,
                     loop_engine_.state().in_seconds,
@@ -1810,6 +1835,10 @@ private:
                 : Interaction::marker_out;
             drag_marker_in_ = loop_engine_.state().in_seconds;
             drag_marker_out_ = loop_engine_.state().out_seconds;
+            editor_feedback_ = interaction_ == Interaction::marker_in
+                ? L"Dragging IN (release to save)"
+                : L"Dragging OUT (release to save)";
+            redraw(false, false);
         } else {
             interaction_ = Interaction::pending_pan;
         }
@@ -1846,10 +1875,7 @@ private:
                 : loop_engine_.set_out_clamped(seconds,
                                                waveform_->duration_seconds);
             if (result.valid) {
-                editor_feedback_ = interaction_ == Interaction::marker_in
-                    ? L"Dragging IN (release to save)"
-                    : L"Dragging OUT (release to save)";
-                redraw(false);
+                redraw_marker_drag();
             }
             return;
         }
@@ -1890,7 +1916,7 @@ private:
                 ? L"IN marker saved"
                 : L"OUT marker saved";
             persist_editor();
-            redraw(false);
+            redraw(false, false);
         }
     }
 
@@ -1899,7 +1925,7 @@ private:
             interaction_ == Interaction::marker_out) {
             (void)loop_engine_.set_markers(drag_marker_in_, drag_marker_out_);
             editor_feedback_ = L"Marker drag cancelled";
-            redraw(false);
+            redraw(false, false);
         }
         interaction_ = Interaction::none;
     }
@@ -1999,7 +2025,7 @@ private:
         if (!playback_->is_playing()) {
             playback_state_ = PlaybackState::stopped;
             track_title_ = "No track";
-            redraw(false);
+            redraw(false, false);
             return;
         }
 
@@ -2018,17 +2044,30 @@ private:
             track_title_ = "Opening...";
         }
         sync_cursor_timer();
-        redraw(false);
+        redraw(false, false);
     }
 
-    void redraw(bool invalidate_waveform_layer = true) noexcept {
+    void redraw(bool invalidate_waveform_layer = true,
+                bool invalidate_grid_layer = true) noexcept {
         if (window_ != nullptr) {
             if (invalidate_waveform_layer) {
                 waveform_layer_dirty_ = true;
             }
-            editor_layer_dirty_ = true;
+            if (invalidate_grid_layer) {
+                editor_layer_dirty_ = true;
+            }
             InvalidateRect(window_, nullptr, FALSE);
         }
+    }
+
+    void redraw_marker_drag() noexcept {
+        if (window_ == nullptr) {
+            return;
+        }
+        const auto layout = panel_layout();
+        InvalidateRect(window_, &layout.marker_info, FALSE);
+        InvalidateRect(window_, &layout.duration_info, FALSE);
+        InvalidateRect(window_, &layout.waveform, FALSE);
     }
 
     void redraw_waveform() noexcept {

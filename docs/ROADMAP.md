@@ -79,8 +79,11 @@ the fixes without crashes, stale results or playback/UI regressions.
 Acceptance evidence: edit a loop visually, reload the track and confirm markers
 return while Loop remains disabled. Implementation evidence is complete: core
 tests pass, Release x64 builds against SDK 2025-03-07 and package inspection
-places the DLL at the archive root. Runtime acceptance remains pending manual
-foobar2000 testing; M4 is not accepted on build evidence alone.
+places the DLL at the archive root. The initial manual foobar2000 pass on
+2026-08-02 covered the complete M4 checklist and found two follow-ups: Escape
+did not restore numeric edit text, although core state remained valid, and
+marker dragging flickered. Both have implementation fixes and require focused
+runtime retesting. M4 is not accepted on build evidence alone.
 
 ## M5 — Playback looping
 
@@ -130,6 +133,6 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Manually test and accept M4 in foobar2000, including persistence across restart,
-Loop remaining Off, theme/DPI/layout behavior and M3 responsiveness. Do not
-begin M5 playback looping until this acceptance is complete.
+Focused manual retest of M4 in foobar2000: confirm Escape restores BPM and grid
+offset text, marker dragging no longer flickers, and CPU use remains acceptable.
+Do not begin M5 playback looping until M4 runtime acceptance is complete.

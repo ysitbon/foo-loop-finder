@@ -44,9 +44,10 @@ Waveform interactions:
 - Drag an IN or OUT marker line to edit it; marker hits take priority over pan.
 - Double-click to restore the whole-track overview.
 
-The static waveform is rendered to one off-screen layer. Grid and marker
-overlays are composed into a separate cached presentation layer, so editor-only
-changes never rebuild waveform analysis or its bitmap. During ordinary
+The static waveform is rendered to one off-screen layer. The grid is composed
+into a separate cached presentation layer, while the two lightweight marker
+lines and playback cursor are drawn over that cache. Marker edits therefore do
+not rebuild the grid, waveform analysis or waveform bitmap. During ordinary
 playback, redraws occur only when the cursor crosses a display pixel and affect
 only its old and new strips. Analysis format `waveform-v2` retains up to 262,144
 bins so zoomed views do not have to enlarge low-resolution overview data.

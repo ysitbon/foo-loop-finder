@@ -183,10 +183,12 @@ to the host.
 
 Waveform drawing uses a panel-size-dependent off-screen GDI base layer derived
 from the immutable snapshot. A second disposable presentation layer copies that
-base and adds bounded grid lines and IN/OUT markers. BPM, phase, snapping and
-marker changes invalidate only the presentation layer; they do not rebuild the
-waveform base or rerun analysis. Ordinary playback ticks invalidate only old and
-new cursor strips and restore the already composed presentation with `BitBlt`.
+base and adds bounded grid lines. BPM and phase changes invalidate this grid
+layer without rebuilding the waveform base or rerunning analysis. The two
+lightweight IN/OUT marker lines and playback cursor are drawn over the cached
+grid layer; marker drags invalidate only the waveform and adjacent marker-value
+regions. Ordinary playback ticks invalidate only old and new cursor strips and
+restore the already composed presentation with `BitBlt`.
 
 Pan and zoom rendering is also completed in the off-screen layer before the
 visible surface changes. The paint path does not clear a waveform-only update;
