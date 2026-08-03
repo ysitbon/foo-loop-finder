@@ -85,29 +85,38 @@ places the DLL at the archive root. The initial manual foobar2000 pass on
 Escape restoration fix, then identified caret reset after Enter and continued
 marker-drag repainting while stopped. The next build preserves the edit
 selection and limits drag paints to changed marker strips. Focused manual
-retesting on 2026-08-03 confirmed both fixes. M4 is accepted; the Loop control
-still changes editor state only and does not seek playback.
+retesting on 2026-08-03 confirmed both fixes. M4 is accepted; at that milestone
+the Loop control changed editor state only. Audible transport is tracked in M5.
 
 ## M5 — Playback looping
 
-- [ ] Observe playback position through the foobar2000 SDK.
-- [ ] Seek from OUT to IN only while Loop is enabled.
-- [ ] Do not intercept manual seeking.
-- [ ] Prevent recursive or duplicate automatic seeks.
-- [ ] Handle pause, stop, track change and invalid/unseekable sources safely.
-- [ ] Measure boundary jitter and document the initial transport limitation.
+- [x] Observe playback position through the foobar2000 SDK.
+- [x] Seek from OUT to IN only while Loop is enabled.
+- [x] Do not intercept manual seeking.
+- [x] Prevent recursive or duplicate automatic seeks.
+- [x] Handle pause, stop, track change and invalid/unseekable sources safely.
+- [x] Measure boundary jitter and document the initial transport limitation.
 
 Acceptance evidence: repeatedly loop short and multi-bar regions, manually seek
 inside and outside them, and change tracks without transport lockups.
 
 Implementation evidence on 2026-08-03: the portable generation-aware transport
 tests pass, Release x64 builds against SDK 2025-03-07, and package inspection
-places `foo_loop_finder.dll` at the archive root. The checkboxes remain open
-until the new component is installed and its transport behavior and boundary
-jitter are observed in foobar2000. An initial runtime attempt exposed and
-documented foobar2000's bug check when `playback_seek()` was called re-entrantly
-from `on_playback_time`; automatic seeks are now deferred to a separately
-queued main-thread callback, and that fix still requires runtime retesting.
+places `foo_loop_finder.dll` at the archive root.
+
+Runtime evidence on 2026-08-03: foobar2000 v2.25.10 accepted and loaded the
+initial M5 component. A real OUT crossing reached `on_playback_time`, proving
+SDK playback-position observation, then foobar2000 issued a bug check because
+that build called `playback_seek()` re-entrantly from the playback callback.
+Automatic seeks are now deferred to a separately queued main-thread callback.
+The fixed package builds and passes portable tests. Manual runtime acceptance
+was confirmed on 2026-08-03 for the complete M5 checklist: short and multi-bar
+loops, manual seeks inside and outside, rapid scrubbing, pause/resume, stop and
+start, track changes, live marker edits, rapid Loop toggling, restart safety and
+unseekable-source handling all passed without another bug check, duplicate seek
+or transport lockup. The expected seek gap/click and boundary jitter were
+observed as limitations of the initial transport; no numeric performance value
+is recorded because none was supplied. M5 is accepted.
 
 ## M6 — Automatic tempo analysis
 
@@ -145,7 +154,6 @@ drift, audio-thread allocation spikes or implicit Loop activation.
 
 ## Current next action
 
-Install the M5 package and complete playback-looping runtime acceptance,
-including manual-seek behavior, unseekable handling when available, restart
-safety and measured boundary diagnostics. Do not begin M6 until that evidence
-is recorded.
+Begin M6 automatic tempo analysis by evaluating candidate BPM/beat libraries
+and their redistribution licences. Keep automatic results separate from manual
+BPM and phase overrides.
